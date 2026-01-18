@@ -2,6 +2,7 @@
 import { E, MATERIALS } from './elements.js';
 
 const canvas = document.getElementById('c');
+const ui = document.getElementById('ui');
 const hud = document.getElementById('hud');
 const hud2 = document.getElementById('hud2');
 
@@ -47,6 +48,18 @@ worker.postMessage({
   dpr: DPR,
 }, [off]);
 
+function resizeDisplay() {
+  const scale = Math.max(
+    1,
+    Math.floor(Math.min(window.innerWidth / SIM_W, window.innerHeight / SIM_H)),
+  );
+  canvas.style.width = `${SIM_W * scale}px`;
+  canvas.style.height = `${SIM_H * scale}px`;
+}
+
+resizeDisplay();
+window.addEventListener('resize', resizeDisplay);
+
 let visualizeMode = 0; // 0 none, 1 wind speed, 2 vectors, 3 tracers
 let isDown = false;
 let last = null;
@@ -89,7 +102,21 @@ function stroke(from, to) {
   worker.postMessage({ type: 'stroke', from, to, state: uiState() });
 }
 
+function isUiEvent(e) {
+  return Boolean(e.target.closest('#ui'));
+}
+
+function stopUiPointer(e) {
+  e.preventDefault();
+  e.stopPropagation();
+}
+
+ui.addEventListener('pointerdown', stopUiPointer);
+ui.addEventListener('pointermove', stopUiPointer);
+ui.addEventListener('pointerup', stopUiPointer);
+
 window.addEventListener('pointerdown', (e) => {
+  if (isUiEvent(e)) return;
   if (e.button !== 0) return;
   isDown = true;
   last = canvasPos(e);
@@ -97,6 +124,7 @@ window.addEventListener('pointerdown', (e) => {
 });
 
 window.addEventListener('pointermove', (e) => {
+  if (isUiEvent(e)) return;
   const p = canvasPos(e);
   mouse = { ...p, inside: true };
   worker.postMessage({ type: 'cursor', x: p.x, y: p.y });
