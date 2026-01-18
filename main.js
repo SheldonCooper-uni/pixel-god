@@ -93,6 +93,10 @@ function startWorker() {
   if (worker) worker.terminate();
   worker = new Worker('./simWorker.js', { type: 'module' });
 
+  worker.onerror = (err) => {
+    console.error('Worker error:', err.message, err.filename, err.lineno);
+  };
+
   worker.onmessage = (ev) => {
     const msg = ev.data;
     if (msg.type === 'frame') {
@@ -199,6 +203,7 @@ canvas.addEventListener('pointerdown', (e) => {
   if (e.button !== 0) return;
   isDown = true;
   last = canvasPos(e);
+  canvas.setPointerCapture(e.pointerId);
   stroke(last, last);
 });
 
@@ -209,16 +214,20 @@ canvas.addEventListener('pointermove', (e) => {
   if (!isDown) return;
   if (!last) last = p;
   if (lineMode) {
+    // In line mode, keep drawing from original start point (don't update last)
     stroke(last, p);
-    last = p;
   } else {
     stroke(last, p);
     last = p;
   }
 });
 
-canvas.addEventListener('pointerup', () => { isDown = false; last = null; });
-canvas.addEventListener('pointerleave', () => { mouse.inside = false; isDown = false; last = null; });
+canvas.addEventListener('pointerup', (e) => {
+  isDown = false;
+  last = null;
+  canvas.releasePointerCapture(e.pointerId);
+});
+canvas.addEventListener('pointerleave', () => { mouse.inside = false; });
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Shift') lineMode = true;
