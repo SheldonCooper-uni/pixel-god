@@ -207,6 +207,15 @@ canvas.addEventListener('pointerdown', (e) => {
   stroke(last, last);
 });
 
+function endPointerStroke(e) {
+  if (!isDown) return;
+  isDown = false;
+  last = null;
+  if (canvas.hasPointerCapture(e.pointerId)) {
+    canvas.releasePointerCapture(e.pointerId);
+  }
+}
+
 canvas.addEventListener('pointermove', (e) => {
   const p = canvasPos(e);
   mouse = { ...p, inside: true };
@@ -222,11 +231,9 @@ canvas.addEventListener('pointermove', (e) => {
   }
 });
 
-canvas.addEventListener('pointerup', (e) => {
-  isDown = false;
-  last = null;
-  canvas.releasePointerCapture(e.pointerId);
-});
+canvas.addEventListener('pointerup', endPointerStroke);
+canvas.addEventListener('pointercancel', endPointerStroke);
+canvas.addEventListener('lostpointercapture', endPointerStroke);
 canvas.addEventListener('pointerleave', () => { mouse.inside = false; });
 
 window.addEventListener('keydown', (e) => {
