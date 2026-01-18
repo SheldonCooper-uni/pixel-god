@@ -1,4 +1,3 @@
-// elements.js
 export const E = {
   AIR: 0,
   STONE: 1,
