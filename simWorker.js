@@ -292,14 +292,28 @@ function paintAt(nx, ny, nx2, ny2, st){
       if (s > 0) {
         if (typeA[i]===E.WOOD || typeA[i]===E.PLANT || typeA[i]===E.OIL) {
           typeA[i]=E.FIRE; dataA[i]=40+irand(60);
+          markIndex(i);
+        } else if (typeA[i]===E.ICE) {
+          typeA[i]=E.WATER; dataA[i]=0;
+          markIndex(i);
+        } else if (typeA[i]===E.WATER && rnd()<0.02) {
+          typeA[i]=E.STEAM; dataA[i]=60+irand(40);
+          markIndex(i);
+        } else if (typeA[i]===E.MUD && rnd()<0.01) {
+          typeA[i]=E.DIRT; dataA[i]=10;
+          markIndex(i);
         }
-        if (typeA[i]===E.ICE) { typeA[i]=E.WATER; dataA[i]=0; }
-        if (typeA[i]===E.WATER && rnd()<0.02) { typeA[i]=E.STEAM; dataA[i]=60+irand(40); }
-        if (typeA[i]===E.MUD && rnd()<0.01) { typeA[i]=E.DIRT; dataA[i]=10; } // dry mud
       } else if (s < 0) {
-        if (typeA[i]===E.WATER && rnd()<0.4) { typeA[i]=E.ICE; dataA[i]=0; }
-        if (typeA[i]===E.LAVA && rnd()<0.15) { typeA[i]=E.STONE; dataA[i]=0; }
-        if (typeA[i]===E.STEAM && rnd()<0.3) { typeA[i]=E.WATER; dataA[i]=0; } // condense
+        if (typeA[i]===E.WATER && rnd()<0.4) {
+          typeA[i]=E.ICE; dataA[i]=0;
+          markIndex(i);
+        } else if (typeA[i]===E.LAVA && rnd()<0.15) {
+          typeA[i]=E.STONE; dataA[i]=0;
+          markIndex(i);
+        } else if (typeA[i]===E.STEAM && rnd()<0.3) {
+          typeA[i]=E.WATER; dataA[i]=0;
+          markIndex(i);
+        }
       }
       return;
     }
