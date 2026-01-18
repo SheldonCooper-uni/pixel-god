@@ -15,6 +15,8 @@ export const E = {
   OIL: 13,
   LAVA: 14,
   ASH: 15,
+  STEAM: 16,
+  MUD: 17,
 };
 
 export const MATERIALS = [
@@ -27,10 +29,12 @@ export const MATERIALS = [
   { id: E.WOOD,  name: 'Holz' },
   { id: E.FIRE,  name: 'Feuer' },
   { id: E.SMOKE, name: 'Rauch' },
+  { id: E.STEAM, name: 'Dampf' },
   { id: E.ICE,   name: 'Eis' },
   { id: E.OIL,   name: 'Oel' },
   { id: E.LAVA,  name: 'Lava' },
   { id: E.ASH,   name: 'Asche' },
+  { id: E.MUD,   name: 'Schlamm' },
   { id: E.HUMAN, name: 'Mensch' },
   { id: E.BIRD,  name: 'Vogel' },
 ];
@@ -56,6 +60,8 @@ PALETTE[E.ICE]   = c(170,220,255,230);
 PALETTE[E.OIL]   = c(30,  30, 40,255);
 PALETTE[E.LAVA]  = c(255,60,  10,255);
 PALETTE[E.ASH]   = c(90,  90, 95,255);
+PALETTE[E.STEAM] = c(200, 210,230,160);
+PALETTE[E.MUD]   = c(85,  65, 45,255);
 
 export const DENSITY = new Int8Array(256);
 DENSITY[E.AIR]=0;
@@ -74,6 +80,8 @@ DENSITY[E.WOOD]=7;
 DENSITY[E.STONE]=9;
 DENSITY[E.LAVA]=8;
 DENSITY[E.FIRE]=0;
+DENSITY[E.STEAM]=1;
+DENSITY[E.MUD]=5;
 
 export const IS_SOLID = new Uint8Array(256);
 IS_SOLID[E.STONE]=1;
@@ -90,9 +98,11 @@ export const IS_FLUID = new Uint8Array(256);
 IS_FLUID[E.WATER]=1;
 IS_FLUID[E.OIL]=1;
 IS_FLUID[E.LAVA]=1;
+IS_FLUID[E.MUD]=1;
 
 export const IS_GAS = new Uint8Array(256);
 IS_GAS[E.SMOKE]=1;
 IS_GAS[E.FIRE]=1;
+IS_GAS[E.STEAM]=1;
 
 export const NAME_BY_ID = Object.fromEntries(MATERIALS.map(m=>[m.id,m.name]));
