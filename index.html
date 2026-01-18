@@ -43,6 +43,25 @@
         <span id="turbVal" class="value">12</span>
       </div>
 
+      <div class="group">
+        <span class="label">Wind°</span>
+        <input id="windAngle" type="range" min="0" max="360" value="0" />
+        <span id="windAngleVal" class="value">0</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Qualität</span>
+        <select id="quality">
+          <option value="low">Low</option>
+          <option value="medium" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="ultra">Ultra</option>
+        </select>
+        <label class="pill" style="cursor:pointer; user-select:none;">
+          <input id="qualityAuto" type="checkbox" checked style="margin:0 6px 0 0;" />Auto
+        </label>
+      </div>
+
       <button id="clear" class="btn">Clear</button>
       <button id="pause" class="btn">Pause</button>
 
