@@ -2,7 +2,7 @@
 import { E, PALETTE, DENSITY, IS_SOLID, IS_POWDER, IS_FLUID, IS_GAS, NAME_BY_ID } from './elements.js';
 
 let canvas, ctx;
-let W=640, H=360, DPR=1;
+let W=640, H=360;
 
 let typeA, dataA;
 let paused = false;
@@ -10,7 +10,13 @@ let paused = false;
 // Coarse air grid (cheap but useful)
 const AIR_SCALE = 4;
 let aW, aH;
-let pField, vxField, vyField; // Int16
+let pField, pNext, vxField, vyField; // Int16
+
+// Active chunks (big-world enabler)
+const CHUNK = 32;
+let cW = 0, cH = 0;
+let chunkActive, chunkSleep, chunkTouched;
+const CHUNK_SLEEP_TICKS = 60;
 
 // Rendering
 let img, pix32;
@@ -22,15 +28,24 @@ let state = {
   brush: 12,
   strength: 35,
   turb: 12,
+  windAngle: 0,
   visualize: 0,
 };
+
+let lastWindDirX = 1;
+let lastWindDirY = 0;
+
+let canSendFrame = true;
+
+let tick = 0;
+let renderEvery = 1;
 
 // Cursor sampling
 let cursorCell = { x: 0, y: 0 };
 let lastHudSend = 0;
 const paintQueue = [];
-const MAX_STROKES_PER_TICK = 2;
-const MAX_PAINT_QUEUE = 200;
+let maxStrokesPerTick = 2;
+let maxPaintQueue = 200;
 
 // RNG (fast, deterministic-ish)
 let seed = 123456789;
@@ -49,22 +64,80 @@ function toAirY(y){ return (y / AIR_SCALE) | 0; }
 
 function clamp(v,lo,hi){ return v<lo?lo:(v>hi?hi:v); }
 
+function cidx(cx, cy) { return cx + cy * cW; }
+function inChunkBounds(cx, cy) { return cx >= 0 && cx < cW && cy >= 0 && cy < cH; }
+function markChunk(cx, cy) {
+  if (!inChunkBounds(cx, cy)) return;
+  const ci = cidx(cx, cy);
+  chunkActive[ci] = 1;
+  chunkSleep[ci] = 0;
+  chunkTouched[ci] = 1;
+}
+function markChunkNeighbors(cx, cy) {
+  for (let oy = -1; oy <= 1; oy++) {
+    for (let ox = -1; ox <= 1; ox++) {
+      markChunk(cx + ox, cy + oy);
+    }
+  }
+}
+function markIndex(i) {
+  const x = i % W;
+  const y = (i / W) | 0;
+  markChunkNeighbors((x / CHUNK) | 0, (y / CHUNK) | 0);
+}
+
+function initChunks() {
+  cW = Math.ceil(W / CHUNK);
+  cH = Math.ceil(H / CHUNK);
+  chunkActive = new Uint8Array(cW * cH);
+  chunkSleep = new Uint16Array(cW * cH);
+  chunkTouched = new Uint8Array(cW * cH);
+  chunkActive.fill(1);
+  chunkSleep.fill(0);
+  chunkTouched.fill(1);
+}
+
+function beginTick() {
+  if (chunkTouched) chunkTouched.fill(0);
+}
+
+function endTick() {
+  if (!chunkActive) return;
+  const n = chunkActive.length;
+  for (let ci = 0; ci < n; ci++) {
+    if (!chunkActive[ci]) continue;
+    if (chunkTouched[ci]) {
+      chunkSleep[ci] = 0;
+    } else {
+      const s = (chunkSleep[ci] + 1) | 0;
+      chunkSleep[ci] = s;
+      if (s > CHUNK_SLEEP_TICKS) chunkActive[ci] = 0;
+    }
+  }
+}
+
 function clearWorld(){
   typeA.fill(E.AIR);
   dataA.fill(0);
   pField.fill(0);
+  pNext?.fill(0);
   vxField.fill(0);
   vyField.fill(0);
+
+  chunkActive?.fill(1);
+  chunkSleep?.fill(0);
+  chunkTouched?.fill(1);
 }
 
 function resizeCanvasToFit(){
-  // Fit to device, keep simulation resolution fixed.
-  // We scale the drawing to the visible canvas size.
-  // Worker only knows the backing size; main canvas element handles CSS sizing.
-  canvas.width = Math.floor(W * DPR);
-  canvas.height = Math.floor(H * DPR);
-  ctx.setTransform(DPR,0,0,DPR,0,0);
+  // Worker renders at simulation resolution; main thread handles integer CSS scaling.
+  canvas.width = W;
+  canvas.height = H;
+  ctx.setTransform(1, 0, 0, 1, 0, 0);
   ctx.imageSmoothingEnabled = false;
+  ctx.mozImageSmoothingEnabled = false;
+  ctx.webkitImageSmoothingEnabled = false;
+  ctx.msImageSmoothingEnabled = false;
 }
 
 function initBuffers(){
@@ -74,11 +147,16 @@ function initBuffers(){
   aW = Math.ceil(W / AIR_SCALE);
   aH = Math.ceil(H / AIR_SCALE);
   pField  = new Int16Array(aW*aH);
+  pNext   = new Int16Array(aW*aH);
   vxField = new Int16Array(aW*aH);
   vyField = new Int16Array(aW*aH);
 
   img = ctx.createImageData(W, H);
   pix32 = new Uint32Array(img.data.buffer);
+
+  renderEvery = (W * H >= 960 * 540) ? 2 : 1;
+
+  initChunks();
 
   clearWorld();
 
@@ -128,13 +206,27 @@ function paintAt(nx, ny, nx2, ny2, st){
   const x1 = clamp((nx2*W)|0, 0, W-1);
   const y1 = clamp((ny2*H)|0, 0, H-1);
 
-  // Direction for wind tool based on stroke vector
+  // Direction for wind tool
+  // - If the user drags: use stroke direction and remember it
+  // - If the user clicks: use UI angle; fallback to last direction
   const ddx = x1 - x0;
   const ddy = y1 - y0;
-  let len = Math.hypot(ddx,ddy);
-  if (len < 0.0001) len = 1;
-  const dirx = ddx / len;
-  const diry = ddy / len;
+  let dirx = lastWindDirX;
+  let diry = lastWindDirY;
+  const l2 = ddx*ddx + ddy*ddy;
+  if (l2 > 0) {
+    const len = Math.sqrt(l2) || 1;
+    dirx = ddx / len;
+    diry = ddy / len;
+    lastWindDirX = dirx;
+    lastWindDirY = diry;
+  } else if (Number.isFinite(st?.windAngle)) {
+    const a = (st.windAngle * Math.PI) / 180;
+    dirx = Math.cos(a);
+    diry = Math.sin(a);
+    lastWindDirX = dirx;
+    lastWindDirY = diry;
+  }
   st = { ...st, dirx, diry };
 
   const r = st.brush|0;
@@ -144,8 +236,10 @@ function paintAt(nx, ny, nx2, ny2, st){
     if (!inb(x,y)) return;
 
     if (tool === 'erase') {
-      typeA[idx(x,y)] = E.AIR;
-      dataA[idx(x,y)] = 0;
+      const i = idx(x,y);
+      typeA[i] = E.AIR;
+      dataA[i] = 0;
+      markIndex(i);
       return;
     }
 
@@ -160,6 +254,7 @@ function paintAt(nx, ny, nx2, ny2, st){
       else if (t===E.SEED) dataA[i] = 0;
       else if (t===E.PLANT) dataA[i] = 10;
       else dataA[i] = 0;
+      markIndex(i);
       return;
     }
 
@@ -176,12 +271,14 @@ function paintAt(nx, ny, nx2, ny2, st){
       const jitter = (irand(2*turb+1) - turb);
       vxField[ai] = clamp(vxField[ai] + (dx*s*6 + jitter)|0, -32000, 32000);
       vyField[ai] = clamp(vyField[ai] + (dy*s*6 + jitter)|0, -32000, 32000);
+      markChunkNeighbors((x / CHUNK) | 0, (y / CHUNK) | 0);
       return;
     }
 
     if (tool === 'pressure') {
       const s = st.strength|0;
       pField[ai] = clamp(pField[ai] + (s*30)|0, -32000, 32000);
+      markChunkNeighbors((x / CHUNK) | 0, (y / CHUNK) | 0);
       return;
     }
 
@@ -213,6 +310,9 @@ function paintAt(nx, ny, nx2, ny2, st){
 function swap(i,j){
   const t = typeA[i]; typeA[i]=typeA[j]; typeA[j]=t;
   const d = dataA[i]; dataA[i]=dataA[j]; dataA[j]=d;
+
+  markIndex(i);
+  markIndex(j);
 }
 
 function isEmptyForMove(t){
@@ -230,16 +330,26 @@ function tryMove(i, ni){
 }
 
 function updatePowdersAndFluids(){
-  // bottom-up pass for falling stuff
-  for (let y=H-2; y>=0; y--) {
-    const row = y*W;
-    const dir = (y & 1) ? 1 : -1;
-    let xStart = dir===1 ? 0 : W-1;
-    let xEnd   = dir===1 ? W : -1;
+  // bottom-up pass for falling stuff (active chunks only)
+  for (let cy=cH-1; cy>=0; cy--) {
+    for (let cx=0; cx<cW; cx++) {
+      const ci = cidx(cx, cy);
+      if (!chunkActive[ci]) continue;
 
-    for (let x=xStart; x!==xEnd; x+=dir) {
-      const i = row + x;
-      const t = typeA[i];
+      const xMin = cx * CHUNK;
+      const xMax = Math.min(W, xMin + CHUNK);
+      const yMin = cy * CHUNK;
+      const yMax = Math.min(H, yMin + CHUNK);
+
+      for (let y=yMax-2; y>=yMin; y--) {
+        const row = y*W;
+        const dir = (y & 1) ? 1 : -1;
+        let xStart = dir===1 ? xMin : (xMax-1);
+        let xEnd   = dir===1 ? xMax : (xMin-1);
+
+        for (let x=xStart; x!==xEnd; x+=dir) {
+          const i = row + x;
+          const t = typeA[i];
 
       if (t===E.SAND || t===E.DIRT || t===E.SEED || t===E.ASH) {
         // powders
@@ -253,7 +363,13 @@ function updatePowdersAndFluids(){
         const dl = (x>0) ? (below-1) : -1;
         const dr = (x<W-1) ? (below+1) : -1;
         if (dl>=0 && dr>=0) {
-          if (rnd()<0.5) { if (tryMove(i, dl)) continue; if (tryMove(i, dr)) continue; }
+          // Air bias nudges drift (stronger for ash/seed)
+          const bias = sampleAirVX(x,y);
+          const preferRight = bias > (t===E.ASH || t===E.SEED ? 300 : 900);
+          const preferLeft  = bias < (t===E.ASH || t===E.SEED ? -300 : -900);
+          if (preferLeft) { if (tryMove(i, dl)) continue; if (tryMove(i, dr)) continue; }
+          else if (preferRight) { if (tryMove(i, dr)) continue; if (tryMove(i, dl)) continue; }
+          else if (rnd()<0.5) { if (tryMove(i, dl)) continue; if (tryMove(i, dr)) continue; }
           else { if (tryMove(i, dr)) continue; if (tryMove(i, dl)) continue; }
         } else if (dl>=0) {
           tryMove(i, dl);
@@ -340,31 +456,47 @@ function updatePowdersAndFluids(){
           }
         }
       }
+        }
+      }
     }
   }
 }
 
 function updateGasesAndBirds(){
-  // top-down pass for rising smoke, plus birds flying
-  for (let y=1; y<H; y++) {
-    const row = y*W;
-    const dir = (y & 1) ? 1 : -1;
-    let xStart = dir===1 ? 0 : W-1;
-    let xEnd   = dir===1 ? W : -1;
+  // top-down pass for rising smoke, plus birds flying (active chunks only)
+  for (let cy=0; cy<cH; cy++) {
+    for (let cx=0; cx<cW; cx++) {
+      const ci = cidx(cx, cy);
+      if (!chunkActive[ci]) continue;
 
-    for (let x=xStart; x!==xEnd; x+=dir) {
-      const i = row + x;
-      const t = typeA[i];
+      const xMin = cx * CHUNK;
+      const xMax = Math.min(W, xMin + CHUNK);
+      const yMin = cy * CHUNK;
+      const yMax = Math.min(H, yMin + CHUNK);
+
+      for (let y=Math.max(1, yMin); y<yMax; y++) {
+        const row = y*W;
+        const dir = (y & 1) ? 1 : -1;
+        let xStart = dir===1 ? xMin : (xMax-1);
+        let xEnd   = dir===1 ? xMax : (xMin-1);
+
+        for (let x=xStart; x!==xEnd; x+=dir) {
+          const i = row + x;
+          const t = typeA[i];
 
       if (t===E.SMOKE) {
         let ttl = dataA[i];
-        if (ttl>0) dataA[i] = ttl-1; else { typeA[i]=E.AIR; continue; }
+        if (ttl>0) { dataA[i] = ttl-1; markIndex(i); }
+        else { typeA[i]=E.AIR; dataA[i]=0; markIndex(i); continue; }
 
         const ax = sampleAirVX(x,y);
-        const sideways = ax < -600 ? -1 : (ax > 600 ? 1 : (rnd()<0.5?-1:1));
+        const ay = sampleAirVY(x,y);
+        const sideways = ax < -300 ? -1 : (ax > 300 ? 1 : (rnd()<0.5?-1:1));
 
+        // Smoke is much more "carried" by air
         const up = i - W;
-        if (up>=0 && typeA[up]===E.AIR) { swap(i,up); continue; }
+        if (ay < -500 && up>=0 && typeA[up]===E.AIR) { swap(i,up); continue; }
+        if (up>=0 && typeA[up]===E.AIR && rnd()<0.75) { swap(i,up); continue; }
         const ul = (x>0) ? (up-1) : -1;
         const ur = (x<W-1) ? (up+1) : -1;
         if (sideways<0) {
@@ -401,24 +533,37 @@ function updateGasesAndBirds(){
           }
         }
       }
+        }
+      }
     }
   }
 }
 
 function updateFireAndLife(){
-  // fire + seeds + plants + moisture cycling
-  for (let y=0; y<H; y++) {
-    const row = y*W;
-    for (let x=0; x<W; x++) {
-      const i = row + x;
-      const t = typeA[i];
+  // fire + seeds + plants + moisture cycling (active chunks only)
+  for (let cy=0; cy<cH; cy++) {
+    for (let cx=0; cx<cW; cx++) {
+      const ci = cidx(cx, cy);
+      if (!chunkActive[ci]) continue;
+
+      const xMin = cx * CHUNK;
+      const xMax = Math.min(W, xMin + CHUNK);
+      const yMin = cy * CHUNK;
+      const yMax = Math.min(H, yMin + CHUNK);
+
+      for (let y=yMin; y<yMax; y++) {
+        const row = y*W;
+        for (let x=xMin; x<xMax; x++) {
+          const i = row + x;
+          const t = typeA[i];
 
       if (t===E.FIRE) {
         let ttl = dataA[i];
-        if (ttl>0) dataA[i] = ttl-1;
+        if (ttl>0) { dataA[i] = ttl-1; markIndex(i); }
         else {
           typeA[i] = (rnd()<0.6) ? E.SMOKE : E.AIR;
           dataA[i] = (typeA[i]===E.SMOKE) ? 120+irand(80) : 0;
+          markIndex(i);
           continue;
         }
 
@@ -432,7 +577,7 @@ function updateFireAndLife(){
         if (hasNeighbor(i, E.WATER) && rnd()<0.22) {
           // turn some nearby water into smoke
           forEachNeighbor(i,(ni)=>{
-            if (typeA[ni]===E.WATER && rnd()<0.3) { typeA[ni]=E.SMOKE; dataA[ni]=120; }
+            if (typeA[ni]===E.WATER && rnd()<0.3) { typeA[ni]=E.SMOKE; dataA[ni]=120; markIndex(ni); }
           });
         }
 
@@ -458,7 +603,7 @@ function updateFireAndLife(){
             m += ((avg - m) * 0.08) | 0;
           }
         }
-        dataA[i] = m;
+        if (m !== dataA[i]) { dataA[i] = m; markIndex(i); }
       }
 
       if (t===E.SEED) {
@@ -474,6 +619,7 @@ function updateFireAndLife(){
               if (age > 25 && rnd()<0.25) {
                 typeA[i] = E.PLANT;
                 dataA[i] = 10;
+                markIndex(i);
               }
             }
           }
@@ -492,12 +638,13 @@ function updateFireAndLife(){
             if (typeA[below]===E.DIRT && dataA[below]>0 && rnd()<0.25) dataA[below]--;
           }
         }
-        dataA[i] = age;
+        if (age !== dataA[i]) { dataA[i] = age; markIndex(i); }
 
         // turn to wood trunk
         if (age > 90 && rnd()<0.02) {
           typeA[i] = E.WOOD;
           dataA[i] = 0;
+          markIndex(i);
         }
 
         // sprout upward
@@ -506,6 +653,7 @@ function updateFireAndLife(){
           if (up>=0 && typeA[up]===E.AIR) {
             typeA[up] = E.PLANT;
             dataA[up] = 10;
+            markIndex(up);
           }
         }
 
@@ -513,6 +661,7 @@ function updateFireAndLife(){
         if (moist < 8 && !hasNeighbor(i, E.WATER) && rnd()<0.01) {
           typeA[i] = E.ASH;
           dataA[i] = 0;
+          markIndex(i);
         }
       }
 
@@ -546,6 +695,8 @@ function updateFireAndLife(){
         }
       }
 
+        }
+      }
     }
   }
 }
@@ -557,6 +708,7 @@ function igniteNeighbors(i){
       if (rnd() < 0.22) {
         typeA[ni] = E.FIRE;
         dataA[ni] = 40 + irand(80);
+        markIndex(ni);
       }
     }
   });
@@ -593,10 +745,12 @@ function bestNeighborMoisture(i){
 function updateAir(){
   // pressure diffusion + velocity from pressure gradient + damping
   // Integer math keeps it fast.
-  const damp = 0.92;
-  const diff = 0.18;
+  const damp = 0.96;
+  const diff = 0.22;
+  const grad = 0.45;
+  const buoy = 0.01;
 
-  // diffuse pressure
+  // diffuse pressure (double buffer so it doesn't "self-smear" in-place)
   for (let ay=0; ay<aH; ay++) {
     const row = ay*aW;
     for (let ax=0; ax<aW; ax++) {
@@ -609,9 +763,14 @@ function updateAir(){
       if (ay<aH-1) { sum += pField[i+aW]; cnt++; }
       const avg = cnt ? (sum / cnt) : 0;
       const np = (p + ((avg - p) * diff)) | 0;
-      pField[i] = clamp(np, -32000, 32000);
+      pNext[i] = clamp(np, -32000, 32000);
     }
   }
+
+  // swap buffers
+  const tmp = pField;
+  pField = pNext;
+  pNext = tmp;
 
   // velocity from pressure gradient
   for (let ay=0; ay<aH; ay++) {
@@ -627,8 +786,9 @@ function updateAir(){
       let vx = vxField[i];
       let vy = vyField[i];
 
-      vx = (vx * damp + (pl - pr) * 0.30) | 0;
-      vy = (vy * damp + (pu - pd) * 0.30) | 0;
+      vx = (vx * damp + (pl - pr) * grad) | 0;
+      // positive pressure gently rises (canvas y+ is down -> subtract)
+      vy = (vy * damp + (pu - pd) * grad - p * buoy) | 0;
 
       // mild turbulence (makes it feel more alive)
       if (state.turb > 0 && (seed & 31) === 0) {
@@ -642,7 +802,7 @@ function updateAir(){
       vyField[i] = clamp(vy, -24000, 24000);
 
       // slow relax pressure too
-      pField[i] = (p * 0.995) | 0;
+      pField[i] = (p * 0.998) | 0;
     }
   }
 }
@@ -728,6 +888,13 @@ function render(){
 
   // crosshair / info
   drawCursorInfo();
+
+  // Push a frame to main thread (at most one in-flight).
+  if (canSendFrame) {
+    const bitmap = canvas.transferToImageBitmap();
+    postMessage({ type: 'frame', bitmap }, [bitmap]);
+    canSendFrame = false;
+  }
 }
 
 function drawWindHeatmap(){
@@ -825,27 +992,39 @@ let frameCount = 0;
 let lastFpsT = 0;
 
 function step(t){
+  tick++;
   if (!lastT) lastT = t;
   const dt = t - lastT;
   lastT = t;
 
   if (!paused) {
-    const strokes = Math.min(MAX_STROKES_PER_TICK, paintQueue.length);
+    beginTick();
+    const strokes = Math.min(maxStrokesPerTick, paintQueue.length);
     for (let i = 0; i < strokes; i++) {
       const entry = paintQueue.shift();
       if (entry) paintAt(entry.from.x, entry.from.y, entry.to.x, entry.to.y, entry.state);
     }
-    // adaptive substeps (keeps it smooth when heavy)
-    const sub = dt < 18 ? 2 : (dt < 30 ? 1 : 1);
-    for (let k=0; k<sub; k++) {
-      updatePowdersAndFluids();
+
+    // adaptive substeps for powders/fluids only (biggest impact on feel)
+    const sub = dt < 18 ? 2 : 1;
+    for (let k=0; k<sub; k++) updatePowdersAndFluids();
+
+    // Stagger heavier layers across frames
+    if ((tick & 1) === 0) {
       updateGasesAndBirds();
-      updateFireAndLife();
       updateAir();
     }
+    if ((tick & 3) === 0) {
+      updateFireAndLife();
+    }
+
+    endTick();
   }
 
-  render();
+  // Render only when we can actually ship a frame (backpressure) and on cadence.
+  if (canSendFrame && (tick % renderEvery) === 0) {
+    render();
+  }
 
   frameCount++;
   if (!lastFpsT) lastFpsT = t;
@@ -857,12 +1036,28 @@ function step(t){
 
   maybeSendHud(t);
 
-  setTimeout(() => step(performance.now()), 0);
+  // Cap loop to ~60fps to avoid pegging CPU
+  const target = 1000 / 60;
+  const delay = Math.max(0, target - dt);
+  setTimeout(() => step(performance.now()), delay);
 }
 
 function maybeSendHud(t){
   if (t - lastHudSend < 120) return;
   lastHudSend = t;
+
+  // Adaptive paint budget (quick win for big brushes + fast painting)
+  const qLen = paintQueue.length;
+  if (fps < 30 || qLen > 180) {
+    maxStrokesPerTick = 1;
+    maxPaintQueue = 120;
+  } else if (fps < 45 || qLen > 120) {
+    maxStrokesPerTick = 1;
+    maxPaintQueue = 160;
+  } else {
+    maxStrokesPerTick = 2;
+    maxPaintQueue = 220;
+  }
 
   const cx = clamp(cursorCell.x|0,0,W-1);
   const cy = clamp(cursorCell.y|0,0,H-1);
@@ -878,18 +1073,17 @@ function maybeSendHud(t){
   const kmh = Math.round(Math.hypot(kmhFromV(vx), kmhFromV(vy)));
 
   const text = `FPS ${fps}  |  Tool: ${state.tool}  |  Material: ${NAME_BY_ID[state.material] ?? state.material}  |  Brush: ${state.brush}px`;
-  const text2 = `Cursor: (${cx},${cy})  |  Zelle: ${NAME_BY_ID[tt] ?? tt}  |  Wind: ~${kmh} km/h  |  Druck: ${p}`;
-  postMessage({ type: 'hud', text, text2 });
+  const text2 = `Cursor: (${cx},${cy})  |  Zelle: ${NAME_BY_ID[tt] ?? tt}  |  Wind: ~${kmh} km/h  |  Druck: ${p}  |  Queue: ${paintQueue.length}`;
+  postMessage({ type: 'hud', text, text2, fps, queue: paintQueue.length, w: W, h: H });
 }
 
 // Messages
 onmessage = (ev) => {
   const msg = ev.data;
   if (msg.type === 'init') {
-    canvas = msg.canvas;
     W = msg.simW|0;
     H = msg.simH|0;
-    DPR = msg.dpr || 1;
+    canvas = new OffscreenCanvas(W, H);
     ctx = canvas.getContext('2d', { alpha: false, desynchronized: true });
     resizeCanvasToFit();
     initBuffers();
@@ -897,9 +1091,10 @@ onmessage = (ev) => {
   }
   if (msg.type === 'state') {
     state = { ...state, ...msg.state };
+    state.brush = clamp(state.brush|0, 1, 80);
   }
   if (msg.type === 'stroke') {
-    if (paintQueue.length < MAX_PAINT_QUEUE) {
+    if (paintQueue.length < maxPaintQueue) {
       paintQueue.push({ from: msg.from, to: msg.to, state: msg.state });
     }
   }
@@ -912,5 +1107,8 @@ onmessage = (ev) => {
   if (msg.type === 'cursor') {
     cursorCell.x = clamp((msg.x*W)|0, 0, W-1);
     cursorCell.y = clamp((msg.y*H)|0, 0, H-1);
+  }
+  if (msg.type === 'frameAck') {
+    canSendFrame = true;
   }
 };
