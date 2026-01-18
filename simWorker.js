@@ -28,6 +28,9 @@ let state = {
 // Cursor sampling
 let cursorCell = { x: 0, y: 0 };
 let lastHudSend = 0;
+const paintQueue = [];
+const MAX_STROKES_PER_TICK = 2;
+const MAX_PAINT_QUEUE = 200;
 
 // RNG (fast, deterministic-ish)
 let seed = 123456789;
@@ -805,15 +808,7 @@ function drawTracers(){
 }
 
 function drawCursorInfo(){
-  // lightweight: mark cursor cell
-  const x = cursorCell.x|0;
-  const y = cursorCell.y|0;
-  ctx.save();
-  ctx.globalAlpha = 0.85;
-  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-  ctx.lineWidth = 1;
-  ctx.strokeRect(x-4, y-4, 8, 8);
-  ctx.restore();
+  // cursor overlay removed (kept for HUD sampling)
 }
 
 function kmhFromV(v){
@@ -835,6 +830,11 @@ function step(t){
   lastT = t;
 
   if (!paused) {
+    const strokes = Math.min(MAX_STROKES_PER_TICK, paintQueue.length);
+    for (let i = 0; i < strokes; i++) {
+      const entry = paintQueue.shift();
+      if (entry) paintAt(entry.from.x, entry.from.y, entry.to.x, entry.to.y, entry.state);
+    }
     // adaptive substeps (keeps it smooth when heavy)
     const sub = dt < 18 ? 2 : (dt < 30 ? 1 : 1);
     for (let k=0; k<sub; k++) {
@@ -899,8 +899,9 @@ onmessage = (ev) => {
     state = { ...state, ...msg.state };
   }
   if (msg.type === 'stroke') {
-    const st = msg.state;
-    paintAt(msg.from.x, msg.from.y, msg.to.x, msg.to.y, st);
+    if (paintQueue.length < MAX_PAINT_QUEUE) {
+      paintQueue.push({ from: msg.from, to: msg.to, state: msg.state });
+    }
   }
   if (msg.type === 'clear') {
     clearWorld();
