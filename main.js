@@ -200,7 +200,7 @@ document.getElementById('ui').addEventListener('pointerdown', (e) => {
 });
 
 canvas.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
+  if (e.pointerType === 'mouse' && e.button !== 0) return;
   isDown = true;
   last = canvasPos(e);
   canvas.setPointerCapture(e.pointerId);
