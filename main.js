@@ -19,6 +19,7 @@ const selQuality = document.getElementById('quality');
 const chkQualityAuto = document.getElementById('qualityAuto');
 const btnClear = document.getElementById('clear');
 const btnPause = document.getElementById('pause');
+const uiRoot = document.getElementById('ui');
 
 for (const m of MATERIALS) {
   const opt = document.createElement('option');
@@ -160,6 +161,7 @@ function uiState() {
 }
 
 function sendState() {
+  if (!worker) return;
   worker.postMessage({ type: 'state', state: uiState() });
 }
 
@@ -171,8 +173,8 @@ rngStrength.addEventListener('input', () => { strengthVal.textContent = rngStren
 rngTurb.addEventListener('input', () => { turbVal.textContent = rngTurb.value; sendState(); });
 rngWindAngle.addEventListener('input', () => { windAngleVal.textContent = rngWindAngle.value; sendState(); });
 
-btnClear.addEventListener('click', () => worker.postMessage({ type: 'clear' }));
-btnPause.addEventListener('click', () => worker.postMessage({ type: 'togglePause' }));
+btnClear.addEventListener('click', () => worker?.postMessage({ type: 'clear' }));
+btnPause.addEventListener('click', () => worker?.postMessage({ type: 'togglePause' }));
 
 selQuality?.addEventListener('change', () => {
   setQuality(selQuality.value, 'manual');
@@ -182,52 +184,132 @@ chkQualityAuto?.addEventListener('change', () => {
   // no-op; auto logic reads this value
 });
 
-function canvasPos(e) {
+function canvasPosFromClient(clientX, clientY) {
   const r = canvas.getBoundingClientRect();
-  const x = (e.clientX - r.left) / r.width;
-  const y = (e.clientY - r.top) / r.height;
+  const x = (clientX - r.left) / r.width;
+  const y = (clientY - r.top) / r.height;
   return { x, y };
 }
 
 function stroke(from, to) {
-  worker.postMessage({ type: 'stroke', from, to, state: uiState() });
+  worker?.postMessage({ type: 'stroke', from, to, state: uiState() });
 }
 
-// Use canvas element for pointer events to avoid UI clicks spawning strokes.
-// Stop propagation on UI controls so they don't bubble to the canvas.
-document.getElementById('ui').addEventListener('pointerdown', (e) => {
-  e.stopPropagation();
-});
-
-canvas.addEventListener('pointerdown', (e) => {
-  if (e.button !== 0) return;
-  isDown = true;
-  last = canvasPos(e);
-  canvas.setPointerCapture(e.pointerId);
-  stroke(last, last);
-});
-
-canvas.addEventListener('pointermove', (e) => {
-  const p = canvasPos(e);
+function updateCursor(p) {
   mouse = { ...p, inside: true };
-  worker.postMessage({ type: 'cursor', x: p.x, y: p.y });
-  if (!isDown) return;
+  worker?.postMessage({ type: 'cursor', x: p.x, y: p.y });
+}
+
+function continueStroke(p) {
   if (!last) last = p;
   if (lineMode) {
-    // In line mode, keep drawing from original start point (don't update last)
     stroke(last, p);
   } else {
     stroke(last, p);
     last = p;
   }
+}
+
+// Use canvas element for pointer events to avoid UI clicks spawning strokes.
+// Stop propagation on UI controls so they don't bubble to the canvas.
+uiRoot.addEventListener('pointerdown', (e) => {
+  e.stopPropagation();
 });
 
-canvas.addEventListener('pointerup', (e) => {
-  isDown = false;
-  last = null;
-  canvas.releasePointerCapture(e.pointerId);
-});
-canvas.addEventListener('pointerleave', () => { mouse.inside = false; });
+if ('PointerEvent' in window) {
+  canvas.addEventListener('pointerdown', (e) => {
+    if (e.button !== 0) return;
+    const p = canvasPosFromClient(e.clientX, e.clientY);
+    isDown = true;
+    last = p;
+    canvas.setPointerCapture(e.pointerId);
+    stroke(last, last);
+  });
+
+  canvas.addEventListener('pointermove', (e) => {
+    const p = canvasPosFromClient(e.clientX, e.clientY);
+    updateCursor(p);
+    if (!isDown) return;
+    continueStroke(p);
+  });
+
+  canvas.addEventListener('pointerup', (e) => {
+    isDown = false;
+    last = null;
+    canvas.releasePointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener('pointercancel', (e) => {
+    isDown = false;
+    last = null;
+    canvas.releasePointerCapture(e.pointerId);
+  });
+
+  canvas.addEventListener('pointerleave', () => { mouse.inside = false; });
+} else {
+  const onMouseMove = (e) => {
+    const p = canvasPosFromClient(e.clientX, e.clientY);
+    updateCursor(p);
+    if (!isDown) return;
+    continueStroke(p);
+  };
+
+  const onMouseUp = () => {
+    isDown = false;
+    last = null;
+    window.removeEventListener('mousemove', onMouseMove);
+    window.removeEventListener('mouseup', onMouseUp);
+  };
+
+  canvas.addEventListener('mousedown', (e) => {
+    if (e.button !== 0) return;
+    const p = canvasPosFromClient(e.clientX, e.clientY);
+    isDown = true;
+    last = p;
+    stroke(last, last);
+    window.addEventListener('mousemove', onMouseMove);
+    window.addEventListener('mouseup', onMouseUp);
+  });
+
+  canvas.addEventListener('mousemove', (e) => {
+    if (isDown) return;
+    const p = canvasPosFromClient(e.clientX, e.clientY);
+    updateCursor(p);
+  });
+
+  canvas.addEventListener('mouseleave', () => { mouse.inside = false; });
+
+  uiRoot.addEventListener('mousedown', (e) => e.stopPropagation());
+  uiRoot.addEventListener('touchstart', (e) => e.stopPropagation());
+
+  canvas.addEventListener('touchstart', (e) => {
+    if (!e.touches[0]) return;
+    e.preventDefault();
+    const t = e.touches[0];
+    const p = canvasPosFromClient(t.clientX, t.clientY);
+    isDown = true;
+    last = p;
+    stroke(last, last);
+  }, { passive: false });
+
+  canvas.addEventListener('touchmove', (e) => {
+    if (!e.touches[0]) return;
+    e.preventDefault();
+    const t = e.touches[0];
+    const p = canvasPosFromClient(t.clientX, t.clientY);
+    updateCursor(p);
+    if (!isDown) return;
+    continueStroke(p);
+  }, { passive: false });
+
+  const endTouch = () => {
+    isDown = false;
+    last = null;
+  };
+
+  canvas.addEventListener('touchend', endTouch);
+  canvas.addEventListener('touchcancel', endTouch);
+}
 
 window.addEventListener('keydown', (e) => {
   if (e.key === 'Shift') lineMode = true;
