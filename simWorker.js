@@ -250,9 +250,11 @@ function paintAt(nx, ny, nx2, ny2, st){
       // init state
       if (t===E.FIRE) dataA[i] = 40 + irand(50);
       else if (t===E.SMOKE) dataA[i] = 80 + irand(80);
+      else if (t===E.STEAM) dataA[i] = 50 + irand(50); // shorter TTL than smoke
       else if (t===E.DIRT) dataA[i] = 30; // moisture
       else if (t===E.SEED) dataA[i] = 0;
       else if (t===E.PLANT) dataA[i] = 10;
+      else if (t===E.MUD) dataA[i] = 180; // high moisture
       else dataA[i] = 0;
       markIndex(i);
       return;
@@ -292,10 +294,12 @@ function paintAt(nx, ny, nx2, ny2, st){
           typeA[i]=E.FIRE; dataA[i]=40+irand(60);
         }
         if (typeA[i]===E.ICE) { typeA[i]=E.WATER; dataA[i]=0; }
-        if (typeA[i]===E.WATER && rnd()<0.02) { typeA[i]=E.SMOKE; dataA[i]=120; }
+        if (typeA[i]===E.WATER && rnd()<0.02) { typeA[i]=E.STEAM; dataA[i]=60+irand(40); }
+        if (typeA[i]===E.MUD && rnd()<0.01) { typeA[i]=E.DIRT; dataA[i]=10; } // dry mud
       } else if (s < 0) {
         if (typeA[i]===E.WATER && rnd()<0.4) { typeA[i]=E.ICE; dataA[i]=0; }
         if (typeA[i]===E.LAVA && rnd()<0.15) { typeA[i]=E.STONE; dataA[i]=0; }
+        if (typeA[i]===E.STEAM && rnd()<0.3) { typeA[i]=E.WATER; dataA[i]=0; } // condense
       }
       return;
     }
@@ -316,7 +320,7 @@ function swap(i,j){
 }
 
 function isEmptyForMove(t){
-  return t===E.AIR || t===E.SMOKE || t===E.FIRE || t===E.BIRD;
+  return t===E.AIR || t===E.SMOKE || t===E.STEAM || t===E.FIRE || t===E.BIRD;
 }
 
 function tryMove(i, ni){
@@ -355,7 +359,39 @@ function updatePowdersAndFluids(){
         // powders
         // dirt moves a bit slower to look heavier/"sticky"
         if (t===E.DIRT && (seed & 3) !== 0) continue;
-        if (t===E.ASH && (seed & 1) !== 0) continue;
+
+        const bias = sampleAirVX(x,y);
+        const vyAir = sampleAirVY(x,y);
+
+        // ASH is extremely wind-affected, almost gas-like
+        if (t===E.ASH) {
+          // Strong horizontal wind can push ash sideways even before falling
+          if (Math.abs(bias) > 200) {
+            const sideDir = bias > 0 ? 1 : -1;
+            const ni = i + sideDir;
+            if (inb(x+sideDir, y) && typeA[ni]===E.AIR && rnd() < 0.6) {
+              swap(i, ni);
+              continue;
+            }
+          }
+          // Strong upward wind can even lift ash slightly
+          if (vyAir < -600 && y > 0) {
+            const up = i - W;
+            if (typeA[up]===E.AIR && rnd() < 0.25) { swap(i, up); continue; }
+          }
+        }
+
+        // SEED is also lighter and more wind-affected
+        if (t===E.SEED) {
+          if (Math.abs(bias) > 400) {
+            const sideDir = bias > 0 ? 1 : -1;
+            const ni = i + sideDir;
+            if (inb(x+sideDir, y) && typeA[ni]===E.AIR && rnd() < 0.35) {
+              swap(i, ni);
+              continue;
+            }
+          }
+        }
 
         const below = i + W;
         if (below < W*H && tryMove(i, below)) continue;
@@ -363,10 +399,9 @@ function updatePowdersAndFluids(){
         const dl = (x>0) ? (below-1) : -1;
         const dr = (x<W-1) ? (below+1) : -1;
         if (dl>=0 && dr>=0) {
-          // Air bias nudges drift (stronger for ash/seed)
-          const bias = sampleAirVX(x,y);
-          const preferRight = bias > (t===E.ASH || t===E.SEED ? 300 : 900);
-          const preferLeft  = bias < (t===E.ASH || t===E.SEED ? -300 : -900);
+          // Air bias nudges drift (stronger thresholds for lighter materials)
+          const preferRight = bias > (t===E.ASH ? 100 : (t===E.SEED ? 200 : 900));
+          const preferLeft  = bias < (t===E.ASH ? -100 : (t===E.SEED ? -200 : -900));
           if (preferLeft) { if (tryMove(i, dl)) continue; if (tryMove(i, dr)) continue; }
           else if (preferRight) { if (tryMove(i, dr)) continue; if (tryMove(i, dl)) continue; }
           else if (rnd()<0.5) { if (tryMove(i, dl)) continue; if (tryMove(i, dr)) continue; }
@@ -378,8 +413,8 @@ function updatePowdersAndFluids(){
         }
       }
 
-      if (t===E.WATER || t===E.OIL || t===E.LAVA) {
-        const visc = (t===E.LAVA) ? 3 : 1;
+      if (t===E.WATER || t===E.OIL || t===E.LAVA || t===E.MUD) {
+        const visc = (t===E.LAVA) ? 3 : (t===E.MUD ? 2 : 1);
         if (visc>1 && (seed & visc) !== 0) continue;
 
         // fluids: down, then sideways
@@ -392,8 +427,8 @@ function updatePowdersAndFluids(){
         // try diagonals
         const dl = (x>0) ? (below-1) : -1;
         const dr = (x<W-1) ? (below+1) : -1;
-        if (dl>=0 && (typeA[dl]===E.AIR || typeA[dl]===E.SMOKE)) { if (rnd()<0.5){ swap(i,dl); continue; } }
-        if (dr>=0 && (typeA[dr]===E.AIR || typeA[dr]===E.SMOKE)) { swap(i,dr); continue; }
+        if (dl>=0 && (typeA[dl]===E.AIR || typeA[dl]===E.SMOKE || typeA[dl]===E.STEAM)) { if (rnd()<0.5){ swap(i,dl); continue; } }
+        if (dr>=0 && (typeA[dr]===E.AIR || typeA[dr]===E.SMOKE || typeA[dr]===E.STEAM)) { swap(i,dr); continue; }
 
         // sideways flow
         const left  = (x>0) ? (i-1) : -1;
@@ -405,12 +440,27 @@ function updatePowdersAndFluids(){
           if (right>=0 && typeA[right]===E.AIR) { swap(i,right); continue; }
         } else {
           const bias = sampleAirBias(x,y);
+
+          // WATER surface drift: when water has air above, wind affects it more
+          if (t===E.WATER) {
+            const above = i - W;
+            const hasAirAbove = (y > 0 && typeA[above]===E.AIR);
+            if (hasAirAbove && Math.abs(bias) > 300) {
+              // Surface water drifts with wind
+              const driftDir = bias > 0 ? 1 : -1;
+              const ni = i + driftDir;
+              if (inb(x+driftDir, y) && (typeA[ni]===E.AIR || typeA[ni]===E.SMOKE)) {
+                if (rnd() < 0.4) { swap(i, ni); continue; }
+              }
+            }
+          }
+
           if (bias < 0) {
-            if (left>=0 && (typeA[left]===E.AIR || typeA[left]===E.SMOKE)) { swap(i,left); continue; }
-            if (right>=0 && (typeA[right]===E.AIR || typeA[right]===E.SMOKE)) { swap(i,right); continue; }
+            if (left>=0 && (typeA[left]===E.AIR || typeA[left]===E.SMOKE || typeA[left]===E.STEAM)) { swap(i,left); continue; }
+            if (right>=0 && (typeA[right]===E.AIR || typeA[right]===E.SMOKE || typeA[right]===E.STEAM)) { swap(i,right); continue; }
           } else {
-            if (right>=0 && (typeA[right]===E.AIR || typeA[right]===E.SMOKE)) { swap(i,right); continue; }
-            if (left>=0 && (typeA[left]===E.AIR || typeA[left]===E.SMOKE)) { swap(i,left); continue; }
+            if (right>=0 && (typeA[right]===E.AIR || typeA[right]===E.SMOKE || typeA[right]===E.STEAM)) { swap(i,right); continue; }
+            if (left>=0 && (typeA[left]===E.AIR || typeA[left]===E.SMOKE || typeA[left]===E.STEAM)) { swap(i,left); continue; }
           }
         }
       }
@@ -442,11 +492,24 @@ function updatePowdersAndFluids(){
       }
 
       if (t===E.LAVA) {
-        // lava burns things and can turn water into smoke
+        // lava burns things and can turn water into steam + stone
         if (hasNeighbor(i, E.WATER)) {
           if (rnd() < 0.35) {
-            // cool down -> stone
+            // cool down -> stone + create steam from water + pressure burst
             typeA[i] = E.STONE;
+            dataA[i] = 0;
+            // Convert some nearby water to steam and add pressure burst
+            const ax = toAirX(x), ay = toAirY(y);
+            const ai = aidx(ax, ay);
+            pField[ai] = clamp(pField[ai] + 2000, -32000, 32000);
+            forEachNeighbor(i, (ni) => {
+              if (typeA[ni] === E.WATER && rnd() < 0.6) {
+                typeA[ni] = E.STEAM;
+                dataA[ni] = 60 + irand(60);
+                markIndex(ni);
+              }
+            });
+            markIndex(i);
           }
         }
         if (hasNeighbor(i, E.WOOD) || hasNeighbor(i, E.PLANT) || hasNeighbor(i, E.OIL)) {
@@ -484,19 +547,36 @@ function updateGasesAndBirds(){
           const i = row + x;
           const t = typeA[i];
 
-      if (t===E.SMOKE) {
+      if (t===E.SMOKE || t===E.STEAM) {
         let ttl = dataA[i];
         if (ttl>0) { dataA[i] = ttl-1; markIndex(i); }
-        else { typeA[i]=E.AIR; dataA[i]=0; markIndex(i); continue; }
+        else {
+          // Steam can condense back to water at low pressure, smoke just disappears
+          if (t===E.STEAM) {
+            const ai = aidx(toAirX(x), toAirY(y));
+            if (pField[ai] < -500 && rnd() < 0.15) {
+              typeA[i] = E.WATER;
+              dataA[i] = 0;
+              markIndex(i);
+              continue;
+            }
+          }
+          typeA[i]=E.AIR; dataA[i]=0; markIndex(i); continue;
+        }
 
         const ax = sampleAirVX(x,y);
         const ay = sampleAirVY(x,y);
-        const sideways = ax < -300 ? -1 : (ax > 300 ? 1 : (rnd()<0.5?-1:1));
+        // Stronger wind response - use lower thresholds
+        const driftThresh = (t===E.STEAM) ? 150 : 200;
+        const sideways = ax < -driftThresh ? -1 : (ax > driftThresh ? 1 : (rnd()<0.5?-1:1));
 
-        // Smoke is much more "carried" by air
+        // Smoke/Steam is much more "carried" by air - stronger coupling
         const up = i - W;
-        if (ay < -500 && up>=0 && typeA[up]===E.AIR) { swap(i,up); continue; }
-        if (up>=0 && typeA[up]===E.AIR && rnd()<0.75) { swap(i,up); continue; }
+        // Strong upward wind carries gas up faster
+        if (ay < -300 && up>=0 && typeA[up]===E.AIR) { swap(i,up); continue; }
+        // Natural rise (steam rises faster than smoke)
+        const riseChance = (t===E.STEAM) ? 0.85 : 0.75;
+        if (up>=0 && typeA[up]===E.AIR && rnd()<riseChance) { swap(i,up); continue; }
         const ul = (x>0) ? (up-1) : -1;
         const ur = (x<W-1) ? (up+1) : -1;
         if (sideways<0) {
@@ -507,9 +587,18 @@ function updateGasesAndBirds(){
           if (ul>=0 && typeA[ul]===E.AIR) { swap(i,ul); continue; }
         }
 
-        // drift sideways
-        const ni = i + sideways;
-        if (ni>=0 && ni<W*H && typeA[ni]===E.AIR) { swap(i,ni); }
+        // Horizontal drift based on wind strength - stronger coupling
+        const driftChance = Math.min(0.8, Math.abs(ax) / 1500);
+        if (rnd() < driftChance) {
+          const ni = i + sideways;
+          if (ni>=0 && ni<W*H && typeA[ni]===E.AIR) { swap(i,ni); continue; }
+        }
+
+        // Random drift for liveliness
+        if (rnd() < 0.15) {
+          const ni = i + sideways;
+          if (ni>=0 && ni<W*H && typeA[ni]===E.AIR) { swap(i,ni); }
+        }
       }
 
       if (t===E.BIRD) {
@@ -573,11 +662,10 @@ function updateFireAndLife(){
         // burn oil hard
         if (hasNeighbor(i, E.OIL) && rnd()<0.35) igniteNeighbors(i);
 
-        // evaporate water locally
+        // evaporate water locally (create steam, not smoke)
         if (hasNeighbor(i, E.WATER) && rnd()<0.22) {
-          // turn some nearby water into smoke
           forEachNeighbor(i,(ni)=>{
-            if (typeA[ni]===E.WATER && rnd()<0.3) { typeA[ni]=E.SMOKE; dataA[ni]=120; markIndex(ni); }
+            if (typeA[ni]===E.WATER && rnd()<0.3) { typeA[ni]=E.STEAM; dataA[ni]=60+irand(60); markIndex(ni); }
           });
         }
 
@@ -685,6 +773,38 @@ function updateFireAndLife(){
         // freeze near lots of cold pressure (cheap hack)
         const ai = aidx(toAirX(x), toAirY(y));
         if (pField[ai] < -1500 && rnd()<0.003) typeA[i] = E.ICE;
+
+        // Water + Sand nearby → turn sand to mud (small chance per tick)
+        if (hasNeighbor(i, E.SAND) && rnd() < 0.03) {
+          forEachNeighbor(i, (ni) => {
+            if (typeA[ni] === E.SAND && rnd() < 0.5) {
+              typeA[ni] = E.MUD;
+              dataA[ni] = 200; // high moisture
+              markIndex(ni);
+            }
+          });
+        }
+      }
+
+      if (t===E.MUD) {
+        // Mud dries slowly over time to become dirt
+        let moisture = dataA[i];
+        if (moisture > 0) {
+          // Dry faster near fire
+          if (hasNeighbor(i, E.FIRE)) moisture = Math.max(0, moisture - 5);
+          else if (rnd() < 0.02) moisture--;
+          dataA[i] = moisture;
+          markIndex(i);
+        }
+        if (moisture === 0 && rnd() < 0.05) {
+          typeA[i] = E.DIRT;
+          dataA[i] = 30; // some moisture in new dirt
+          markIndex(i);
+        }
+        // Mud gets wetter from water
+        if (hasNeighbor(i, E.WATER) && moisture < 250) {
+          dataA[i] = Math.min(250, moisture + 3);
+        }
       }
 
       if (t===E.ASH) {
@@ -750,6 +870,10 @@ function updateAir(){
   const grad = 0.45;
   const buoy = 0.01;
 
+  // Ambient turbulence: adds light random drift to make world feel alive
+  // This creates subtle air movement even when player does nothing
+  const ambientTurb = 8; // low constant ambient turbulence
+
   // diffuse pressure (double buffer so it doesn't "self-smear" in-place)
   for (let ay=0; ay<aH; ay++) {
     const row = ay*aW;
@@ -791,10 +915,17 @@ function updateAir(){
       vy = (vy * damp + (pu - pd) * grad - p * buoy) | 0;
 
       // mild turbulence (makes it feel more alive)
-      if (state.turb > 0 && (seed & 31) === 0) {
-        const t = state.turb | 0;
+      // Always add some ambient turbulence for liveliness
+      if ((seed & 31) === 0) {
+        const t = Math.max(ambientTurb, state.turb | 0);
         vx += (irand(2*t+1) - t) * 2;
         vy += (irand(2*t+1) - t) * 2;
+      }
+
+      // Extra random micro-drift for ambient movement (always on)
+      if ((seed & 127) === 0) {
+        vx += irand(5) - 2;
+        vy += irand(3) - 1;
       }
 
       // clamp
@@ -870,6 +1001,17 @@ function render(){
     if (t===E.SMOKE) {
       // smoke alpha already set in palette; keep it
       if (rnd()<0.03) col = blend(col, 0xffc8c8d2, 0.25);
+    }
+    if (t===E.STEAM) {
+      // steam with slight shimmer
+      if (rnd()<0.04) col = blend(col, 0xffffffff, 0.25);
+    }
+    if (t===E.MUD) {
+      // mud color varies with moisture (wetter = darker)
+      const moisture = dataA[i];
+      const wet = clamp(moisture/250, 0, 1);
+      const wetCol = 0xff3a2812; // very dark muddy
+      col = blend(col, wetCol, wet*0.4);
     }
 
     pix32[i] = col;
