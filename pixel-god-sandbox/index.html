@@ -1,0 +1,66 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pixel God Sandbox</title>
+  <link rel="stylesheet" href="ui.css" />
+</head>
+<body>
+  <div id="ui">
+    <div class="row">
+      <div class="group">
+        <span class="label">Tool</span>
+        <select id="tool">
+          <option value="paint">Material</option>
+          <option value="wind">Wind</option>
+          <option value="pressure">Druck</option>
+          <option value="temp">Temperatur</option>
+          <option value="erase">Radierer</option>
+        </select>
+      </div>
+
+      <div class="group">
+        <span class="label">Material</span>
+        <select id="material"></select>
+      </div>
+
+      <div class="group">
+        <span class="label">Pinsel</span>
+        <input id="brush" type="range" min="1" max="60" value="12" />
+        <span id="brushVal" class="value">12</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Stärke</span>
+        <input id="strength" type="range" min="-100" max="100" value="35" />
+        <span id="strengthVal" class="value">35</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Turbulenz</span>
+        <input id="turb" type="range" min="0" max="100" value="12" />
+        <span id="turbVal" class="value">12</span>
+      </div>
+
+      <button id="clear" class="btn">Clear</button>
+      <button id="pause" class="btn">Pause</button>
+
+      <div class="group right">
+        <span class="pill">V: Visualize</span>
+        <span class="pill">1-9: Quick Materials</span>
+        <span class="pill">Shift: Linie</span>
+      </div>
+    </div>
+
+    <div class="row second">
+      <div class="hud" id="hud">…</div>
+      <div class="hud" id="hud2">…</div>
+    </div>
+  </div>
+
+  <canvas id="c"></canvas>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
