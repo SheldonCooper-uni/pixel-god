@@ -590,18 +590,88 @@ function paintAt(nx, ny, nx2, ny2, st){
     }
 
     if (tool === 'temp') {
+      // ===== VERBESSERTES TEMPERATUR-TOOL =====
+      // Stärkere Wirkung, mehr Materialien, sofortiger Effekt
       const s = st.strength|0;
-      // hot: ignite / melt / steam
+      const intensity = Math.abs(s) / 100;  // 0-1 basierend auf Stärke
+      const t = typeA[i];
+
+      // ===== HEISS (s > 0) =====
       if (s > 0) {
-        if (IS_BURNABLE[typeA[i]] && rnd()<0.65) { typeA[i]=E.FIRE; dataA[i]=70+irand(80); }
-        if (typeA[i]===E.ICE) { typeA[i]=E.WATER; dataA[i]=0; }
-        if (typeA[i]===E.WATER && rnd()<0.12) { typeA[i]=E.STEAM; dataA[i]=60+irand(60); }
-        // heat increases pressure
-        pField[ai] = clamp(pField[ai] + 220, -30000, 30000);
-      } else if (s < 0) {
-        if (typeA[i]===E.WATER && rnd()<0.65) { typeA[i]=E.ICE; dataA[i]=0; }
-        if (typeA[i]===E.LAVA && rnd()<0.35) { typeA[i]=E.STONE; dataA[i]=0; }
-        pField[ai] = clamp(pField[ai] - 180, -30000, 30000);
+        // Brennbare Materialien: sofort Feuer
+        if (IS_BURNABLE[t]) {
+          if (rnd() < 0.75 + intensity * 0.25) {  // 75-100% Chance
+            typeA[i] = E.FIRE;
+            dataA[i] = 70 + irand(80);
+          }
+        }
+        // Eis -> Wasser (sofort)
+        else if (t === E.ICE) {
+          typeA[i] = E.WATER;
+          dataA[i] = 128;
+        }
+        // Wasser -> Steam (höhere Chance)
+        else if (t === E.WATER) {
+          if (rnd() < 0.25 + intensity * 0.35) {  // 25-60% Chance
+            typeA[i] = E.STEAM;
+            dataA[i] = 60 + irand(60);
+          } else {
+            // Wasser erwärmen (höhere Temp)
+            dataA[i] = Math.min(255, (dataA[i]|0) + 15);
+          }
+        }
+        // Metall -> Lava (bei extremer Hitze)
+        else if (t === E.METAL && intensity > 0.7 && rnd() < 0.15) {
+          typeA[i] = E.LAVA;
+          dataA[i] = 100;  // Heiß
+        }
+        // Stone -> Lava (bei extremer Hitze)
+        else if (t === E.STONE && intensity > 0.8 && rnd() < 0.08) {
+          typeA[i] = E.LAVA;
+          dataA[i] = 80;
+        }
+        // Sand -> Glass (Stone)
+        else if (t === E.SAND && intensity > 0.6 && rnd() < 0.12) {
+          typeA[i] = E.STONE;  // "Glas"
+          dataA[i] = 0;
+        }
+
+        // Starke Konvektion + Druck
+        pField[ai] = clamp(pField[ai] + 350 + s * 2, -30000, 30000);
+        vyField[ai] = clamp(vyField[ai] - 400 - s * 3, -24000, 24000);  // Aufwärts
+      }
+      // ===== KALT (s < 0) =====
+      else if (s < 0) {
+        // Wasser -> Eis (schnell)
+        if (t === E.WATER) {
+          if (rnd() < 0.70 + intensity * 0.30) {  // 70-100% Chance
+            typeA[i] = E.ICE;
+            dataA[i] = 0;
+          } else {
+            // Wasser abkühlen
+            dataA[i] = Math.max(0, (dataA[i]|0) - 20);
+          }
+        }
+        // Lava -> Stone (schnell)
+        else if (t === E.LAVA) {
+          if (rnd() < 0.55 + intensity * 0.45) {  // 55-100% Chance
+            typeA[i] = E.STONE;
+            dataA[i] = 0;
+          }
+        }
+        // Steam -> Water
+        else if (t === E.STEAM && rnd() < 0.40) {
+          typeA[i] = E.WATER;
+          dataA[i] = 100;  // Kühles Wasser
+        }
+        // Fire löschen
+        else if (t === E.FIRE && rnd() < 0.60) {
+          typeA[i] = E.SMOKE;
+          dataA[i] = 60 + irand(40);
+        }
+
+        // Druck sinkt (Kälte)
+        pField[ai] = clamp(pField[ai] - 280 + s * 2, -30000, 30000);
       }
       markCellAndNeighbors(x,y);
       return;
@@ -1113,6 +1183,78 @@ function fluidStep(x,y,t){
   }
 
   const belowY = y+1;
+
+  // ===== LAVA SPEZIALBEHANDLUNG =====
+  // Lava ist extrem viskos und geht NICHT durch Sand/Dirt durch
+  // Stattdessen: erhitzt Kontaktmaterial, bildet Pool
+  if (t === E.LAVA) {
+    if (belowY < H) {
+      const bi = idx(x, belowY);
+      const b = typeA[bi];
+
+      // Lava geht NUR durch Luft/Gase und leichtere Flüssigkeiten
+      if (b === E.AIR || b === E.SMOKE || b === E.STEAM || b === E.GAS) {
+        swapAt(x, y, x, belowY);
+        return;
+      }
+
+      // Bei Sand/Dirt/Gravel: NICHT durchgehen, stattdessen erhitzen
+      if (b === E.SAND || b === E.DIRT || b === E.GRAVEL || b === E.ASH) {
+        // Lava bleibt oben und bildet Pool
+        // Erhitzen passiert in fireAndLifeCell
+        // Versuche seitlich zu fließen statt durchzufallen
+      }
+      // Bei Wasser: Kontakt-Reaktion (bereits in fireAndLifeCell)
+      else if (b === E.WATER) {
+        // Nicht durchfallen, Reaktion passiert separat
+      }
+      // Nur durch leichtere Flüssigkeiten durchgehen
+      else if (IS_FLUID[b] && DENSITY[b] < DENSITY[E.LAVA]) {
+        swapAt(x, y, x, belowY);
+        return;
+      }
+    }
+
+    // Lava bevorzugt seitliches Fließen (Pool-Bildung)
+    // Langsames seitliches Spread
+    if (rnd() < 0.35) {  // Viskos: nicht immer spreaden
+      const sideX = x + bias;
+      if (inb(sideX, y)) {
+        const si = idx(sideX, y);
+        const s = typeA[si];
+        if (s === E.AIR || s === E.SMOKE || s === E.STEAM || s === E.GAS) {
+          swapAt(x, y, sideX, y);
+          return;
+        }
+      }
+      // Andere Seite versuchen
+      const otherX = x - bias;
+      if (inb(otherX, y)) {
+        const oi = idx(otherX, y);
+        const o = typeA[oi];
+        if (o === E.AIR || o === E.SMOKE || o === E.STEAM || o === E.GAS) {
+          swapAt(x, y, otherX, y);
+          return;
+        }
+      }
+    }
+
+    // Diagonal nach unten nur in Luft/Gas
+    if (belowY < H && rnd() < 0.25) {
+      const diagX = x + bias;
+      if (inb(diagX, belowY)) {
+        const di = idx(diagX, belowY);
+        const d = typeA[di];
+        if (d === E.AIR || d === E.SMOKE || d === E.STEAM || d === E.GAS) {
+          swapAt(x, y, diagX, belowY);
+          return;
+        }
+      }
+    }
+    return;  // Lava-Bewegung fertig
+  }
+
+  // Standard-Fluid-Bewegung für andere Flüssigkeiten
   if (belowY < H) {
     const b = typeA[idx(x,belowY)];
     // oil floats on water
@@ -3501,10 +3643,17 @@ function step(tNow){
     }
 
     // staggered simulation (big perf win)
+    // Air-Update-Frequenz dynamisch basierend auf Frame-Time
+    // Bei Lag: seltener updaten für bessere Performance
+    const airUpdateInterval = dt > 35 ? 3 : (dt > 25 ? 2 : 1);  // 3 = jeden 4. Tick, 2 = jeden 3. Tick, 1 = jeden 2. Tick
+
     updatePowdersAndFluids();
     if ((tick & 1) === 0) {
       updateGases();
       updateEntities();
+    }
+    // Air-Update: dynamisch basierend auf Performance
+    if ((tick % (airUpdateInterval + 1)) === 0) {
       updateAir();
     }
     if ((tick & 3) === 0) {
