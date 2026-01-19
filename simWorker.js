@@ -459,30 +459,40 @@ function paintAt(nx, ny, nx2, ny2, st){
       const d = useStroke ? { x: dirx, y: diry } : fixedDir;
 
       // ===== HOLD-TO-STRENGTHEN =====
-      // Calculate strength multiplier based on hold time
+      // WindStrength = min(MaxStrength, Base + HoldTime * Ramp)
+      // MaxStrength = 9, Ramp = 0.6 per second
       const holdTime = windHoldActive ? (performance.now() - windHoldStartTime) / 1000 : 0;
       const holdMultiplier = Math.min(WIND_MAX_STRENGTH, WIND_BASE_STRENGTH + holdTime * WIND_RAMP_PER_SEC);
 
-      // ===== JET BRUSH WITH GAUSSIAN CORE =====
-      // Stronger center, soft falloff at edges, with fan-out effect
+      // ===== JET BRUSH (nicht Laser!) =====
+      // Mitte: stark, Rand: abfallend (weich), leichtes Fächern
       const edge = 1 - fall;
-      
-      // Fan-out: perpendicular spread increases at edges (not laser-like)
-      const fanStrength = (0.12 + (turb/180)) * edge;
-      // Alternate fan direction for volume effect
-      const fanSign = ((ax + ay) & 1) ? 1 : -1;
-      
+      const distFromCenter = Math.sqrt(1 - fall); // 0 = center, 1 = edge
+
+      // Perpendicular vector for fan-out
+      const perpX = -d.y;
+      const perpY = d.x;
+
+      // Fan-out: Breitet sich am Rand aus (damit's nicht wie Laser wirkt)
+      // Stärker fächern bei höherer Turbulenz
+      const fanBase = 0.18 + (turb / 120);
+      const fanStrength = fanBase * distFromCenter * distFromCenter;
+
+      // Alternierende Fan-Richtung basierend auf Position für Volumen-Effekt
+      const fanPhase = Math.sin((ax * 0.7 + ay * 0.5 + tick * 0.1));
+
       // Start with base direction
       let nx = d.x;
       let ny = d.y;
-      
-      // Add perpendicular fan-out at edges
-      nx += (-d.y) * fanStrength * fanSign;
-      ny += ( d.x) * fanStrength * fanSign;
-      
-      // Add turbulence (random angular deviation)
+
+      // Add perpendicular fan-out at edges (cone shape)
+      nx += perpX * fanStrength * fanPhase;
+      ny += perpY * fanStrength * fanPhase;
+
+      // Turbulenz: zufällige Winkelabweichung (mehr am Rand)
       if (turb > 0) {
-        const turbAngle = ((irand(2001) - 1000) / 1000) * (turb / 100) * (0.3 + edge * 0.7);
+        const turbScale = (turb / 100) * (0.25 + edge * 0.75);
+        const turbAngle = ((irand(2001) - 1000) / 1000) * turbScale * 0.6;
         const ca = Math.cos(turbAngle), sa = Math.sin(turbAngle);
         const rx = nx*ca - ny*sa;
         const ry = nx*sa + ny*ca;
@@ -493,40 +503,45 @@ function paintAt(nx, ny, nx2, ny2, st){
       const mag = Math.hypot(nx,ny) || 1;
       nx /= mag; ny /= mag;
 
-      // Calculate final strength with Gaussian profile and hold multiplier
-      // Core is strong, edges fall off smoothly
-      const coreStrength = baseStrength * 10 * holdMultiplier;
-      const profiledStrength = coreStrength * (0.25 + 0.75 * fall); // Core=100%, edge=25%
-      
+      // ===== STRENGTH PROFILE =====
+      // Gaussian-like: Core=100%, edge=20% (soft falloff)
+      const coreStrength = baseStrength * 12 * holdMultiplier;
+      const profiledStrength = coreStrength * (0.20 + 0.80 * fall);
+
       // Apply velocity to air field
       vxField[ai] = clamp(vxField[ai] + (nx * profiledStrength)|0, -30000, 30000);
       vyField[ai] = clamp(vyField[ai] + (ny * profiledStrength)|0, -30000, 30000);
 
-      // Pressure nudge - creates push effect and helps flow propagate
-      if (fall > 0.1) {
-        const pressureNudge = baseStrength * 8 * fall * holdMultiplier;
+      // ===== PRESSURE PUSH =====
+      // Erzeugt Druck in Windrichtung - hilft bei Ausbreitung
+      if (fall > 0.05) {
+        const pressureNudge = baseStrength * 10 * fall * holdMultiplier;
         pField[ai] = clamp(pField[ai] + pressureNudge|0, -30000, 30000);
       }
 
-      // ===== SPREAD TO NEIGHBORS FOR VOLUME =====
-      // Wind isn't a laser - it spreads slightly to adjacent air cells
-      if (fall > 0.3) {
-        const spreadStr = profiledStrength * 0.15;
-        if (ax > 0) {
-          vxField[ai-1] = clamp(vxField[ai-1] + (nx * spreadStr)|0, -30000, 30000);
-          vyField[ai-1] = clamp(vyField[ai-1] + (ny * spreadStr)|0, -30000, 30000);
-        }
-        if (ax < aW-1) {
-          vxField[ai+1] = clamp(vxField[ai+1] + (nx * spreadStr)|0, -30000, 30000);
-          vyField[ai+1] = clamp(vyField[ai+1] + (ny * spreadStr)|0, -30000, 30000);
-        }
-        if (ay > 0) {
-          vxField[ai-aW] = clamp(vxField[ai-aW] + (nx * spreadStr)|0, -30000, 30000);
-          vyField[ai-aW] = clamp(vyField[ai-aW] + (ny * spreadStr)|0, -30000, 30000);
-        }
-        if (ay < aH-1) {
-          vxField[ai+aW] = clamp(vxField[ai+aW] + (nx * spreadStr)|0, -30000, 30000);
-          vyField[ai+aW] = clamp(vyField[ai+aW] + (ny * spreadStr)|0, -30000, 30000);
+      // ===== SPREAD TO NEIGHBORS (breite Jet-Ausbreitung) =====
+      // Wind ist kein Laser - breitet sich zu benachbarten Zellen aus
+      const spreadRadius = fall > 0.5 ? 2 : 1;
+      const baseSpread = profiledStrength * 0.22;
+
+      for (let sdy = -spreadRadius; sdy <= spreadRadius; sdy++) {
+        for (let sdx = -spreadRadius; sdx <= spreadRadius; sdx++) {
+          if (sdx === 0 && sdy === 0) continue;
+          const sax = ax + sdx;
+          const say = ay + sdy;
+          if (sax < 0 || sax >= aW || say < 0 || say >= aH) continue;
+
+          const sai = aidx(sax, say);
+          const dist = Math.hypot(sdx, sdy);
+          const spreadFall = 1 / (1 + dist * 0.6);
+          const spreadStr = baseSpread * spreadFall;
+
+          // Fächert auch beim Spreaden aus
+          const spreadNX = nx + perpX * sdx * 0.08;
+          const spreadNY = ny + perpY * sdy * 0.08;
+
+          vxField[sai] = clamp(vxField[sai] + (spreadNX * spreadStr)|0, -30000, 30000);
+          vyField[sai] = clamp(vyField[sai] + (spreadNY * spreadStr)|0, -30000, 30000);
         }
       }
 
@@ -2051,33 +2066,36 @@ function strikeLightning(x,y){
 }
 
 function updateAir(){
-  // ===== ENHANCED WIND FIELD SIMULATION =====
-  // Wind has 3 key properties: Advection (carries itself), Diffusion (spreads), Decay (loses energy)
-  
-  const pDiff = 0.22;  // Pressure diffusion rate
-  const damp = clamp((state.windDamp||93) / 100, 0.80, 0.99);
-  const k = 0.38;  // Pressure-to-velocity conversion factor
-  
-  // === Decay rate - wind loses energy over time ===
-  // Lower damp = faster decay (wind dies quicker)
-  const velocityDecay = 0.97 + (damp - 0.80) * 0.15; // 0.97 to 0.997
+  // ===== VOLLSTÄNDIGE WIND-PHYSIK =====
+  // Wind hat 3 Haupteigenschaften:
+  // 1. ADVECTION - Wind trägt sich selbst (Velocity bewegt Velocity)
+  // 2. DECAY - Wind verliert langsam Energie
+  // 3. DIFFUSION - Wind verteilt sich in der Umgebung
 
-  // keep a subtle background drift
+  const pDiff = 0.26;  // Druck-Diffusionsrate (erhöht für bessere Ausbreitung)
+  const damp = clamp((state.windDamp||93) / 100, 0.80, 0.99);
+  const k = 0.42;  // Druck-zu-Geschwindigkeit Faktor (erhöht)
+
+  // === Decay Rate ===
+  // Niedrigerer damp = schnellerer Decay (Wind stirbt schneller)
+  const velocityDecay = 0.965 + (damp - 0.80) * 0.17; // 0.965 to 0.998
+
+  // Hintergrund-Drift für lebendige Welt
   updateAmbientWind();
 
-  // update global wind target (angle + strength)
+  // Global Wind Update (UI-gesteuert)
   const gStr = clamp(state.globalWindStrength|0, 0, 100);
   const gAng = ((state.globalWindAngle||0) * Math.PI) / 180;
-  const gVXTarget = Math.cos(gAng) * gStr * 220;
-  const gVYTarget = Math.sin(gAng) * gStr * 220;
-  globalVX += (gVXTarget - globalVX) * 0.06;
-  globalVY += (gVYTarget - globalVY) * 0.06;
+  const gVXTarget = Math.cos(gAng) * gStr * 240;
+  const gVYTarget = Math.sin(gAng) * gStr * 240;
+  globalVX += (gVXTarget - globalVX) * 0.08;
+  globalVY += (gVYTarget - globalVY) * 0.08;
 
-  // update coarse solidity field for obstacle interaction
+  // Solidity-Feld für Hindernis-Interaktion
   updateSolidField();
 
-  // ===== PRESSURE DIFFUSION =====
-  // Pressure spreads to neighbors, creating smoother gradients
+  // ===== PHASE 1: PRESSURE DIFFUSION =====
+  // Druck breitet sich zu Nachbarn aus (glattere Gradienten)
   for (let ay=0; ay<aH; ay++) {
     const row = ay*aW;
     for (let ax=0; ax<aW; ax++) {
@@ -2093,12 +2111,11 @@ function updateAir(){
       pNext[i] = clamp(np, -30000, 30000);
     }
   }
+  // Buffer tauschen
+  let tmp = pField; pField = pNext; pNext = tmp;
 
-  // swap p buffers
-  const tmp = pField; pField = pNext; pNext = tmp;
-
-  // ===== 1) PRESSURE GRADIENT → VELOCITY =====
-  // Wind is pushed by pressure differences
+  // ===== PHASE 2: PRESSURE GRADIENT → VELOCITY =====
+  // Druckdifferenz erzeugt Wind
   for (let ay=0; ay<aH; ay++) {
     const row = ay*aW;
     for (let ax=0; ax<aW; ax++) {
@@ -2112,33 +2129,33 @@ function updateAir(){
       let vx = vxField[i];
       let vy = vyField[i];
 
-      // Apply pressure gradient and decay
+      // Druckgradient + Decay anwenden
       vx = (vx * damp + (pl - pr) * k) | 0;
       vy = (vy * damp + (pu - pd) * k) | 0;
 
-      // nudge towards global wind to keep a stable base flow
-      vx = (vx + ((globalVX - vx) * 0.02)) | 0;
-      vy = (vy + ((globalVY - vy) * 0.02)) | 0;
+      // Sanfte Anpassung an globalen Wind
+      vx = (vx + ((globalVX - vx) * 0.025)) | 0;
+      vy = (vy + ((globalVY - vy) * 0.025)) | 0;
 
-      // mild turbulence for organic feel
+      // Turbulenz für organisches Gefühl
       const t = state.turb | 0;
-      if (t > 0 && (tick & 15) === 0) {
-        vx += (irand(2*t+1)-t) * 3;
-        vy += (irand(2*t+1)-t) * 3;
+      if (t > 0 && (tick & 7) === 0) {
+        vx += (irand(2*t+1)-t) * 4;
+        vy += (irand(2*t+1)-t) * 4;
       }
 
       vxNext[i] = clamp(vx, -24000, 24000);
       vyNext[i] = clamp(vy, -24000, 24000);
 
-      // Pressure decay (energy dissipation)
-      const relax = 0.985 + (damp - 0.80) * 0.03;
+      // Druck-Relaxation (Energie-Dissipation)
+      const relax = 0.982 + (damp - 0.80) * 0.035;
       pField[i] = (p * relax) | 0;
     }
   }
 
-  // ===== 2) VELOCITY DIFFUSION =====
-  // Wind spreads to neighboring cells - prevents "laser line" effect
-  const vDiff = 0.22;  // Increased diffusion for better spreading
+  // ===== PHASE 3: VELOCITY DIFFUSION =====
+  // Wind breitet sich zu Nachbarzellen aus (verhindert "Laser-Linie")
+  const vDiff = 0.28;  // Erhöht für bessere Ausbreitung
   for (let ay=0; ay<aH; ay++) {
     const row = ay*aW;
     for (let ax=0; ax<aW; ax++) {
@@ -2154,63 +2171,66 @@ function updateAir(){
       const avx = cnt ? (svx/cnt) : vx;
       const avy = cnt ? (svy/cnt) : vy;
 
-      // Blend current velocity with neighbor average
+      // Mischen: aktueller Wert + Nachbar-Durchschnitt
       vxField[i] = clamp((vx * (1-vDiff) + avx * vDiff) | 0, -24000, 24000);
       vyField[i] = clamp((vy * (1-vDiff) + avy * vDiff) | 0, -24000, 24000);
     }
   }
 
-  // ===== 2b) ADVECTION - Wind carries itself =====
-  // This makes wind "flow" and travel across the field
-  // Semi-Lagrangian method: look backward along velocity to find source
+  // ===== PHASE 4: ADVECTION - Wind trägt sich selbst =====
+  // Das macht Wind "lebendig" - er bewegt sich übers Feld
+  // Semi-Lagrangian: schaue zurück entlang des Velocity-Vektors
   for (let i=0; i<vxField.length; i++) { vxNext[i] = vxField[i]; vyNext[i] = vyField[i]; }
-  const advStrength = 1.2;  // How far back to look (increased for more movement)
+
+  const advStrength = 1.5;  // ERHÖHT: stärkere Selbst-Advektion
+  const advBlend = 0.62;    // ERHÖHT: mehr advektierte Velocity übernehmen
+
   for (let ay=0; ay<aH; ay++) {
     for (let ax=0; ax<aW; ax++) {
       const i = aidx(ax,ay);
       const vx = vxNext[i];
       const vy = vyNext[i];
-      
-      // Look backward along the velocity vector
-      const backX = clamp(ax - (vx/20000)*advStrength, 0, aW-1);
-      const backY = clamp(ay - (vy/20000)*advStrength, 0, aH-1);
-      
-      // Bilinear interpolation for smoother advection
+
+      // Schau zurück entlang des Velocity-Vektors
+      const backX = clamp(ax - (vx/18000)*advStrength, 0, aW-1);
+      const backY = clamp(ay - (vy/18000)*advStrength, 0, aH-1);
+
+      // Bilineare Interpolation für glatte Advektion
       const bx0 = Math.floor(backX);
       const by0 = Math.floor(backY);
       const bx1 = Math.min(bx0 + 1, aW - 1);
       const by1 = Math.min(by0 + 1, aH - 1);
       const fx = backX - bx0;
       const fy = backY - by0;
-      
+
       const i00 = aidx(bx0, by0);
       const i10 = aidx(bx1, by0);
       const i01 = aidx(bx0, by1);
       const i11 = aidx(bx1, by1);
-      
-      // Interpolate vx
+
+      // Interpoliere vx
       const vx00 = vxNext[i00], vx10 = vxNext[i10];
       const vx01 = vxNext[i01], vx11 = vxNext[i11];
       const vxTop = vx00 * (1-fx) + vx10 * fx;
       const vxBot = vx01 * (1-fx) + vx11 * fx;
       const advVX = vxTop * (1-fy) + vxBot * fy;
-      
-      // Interpolate vy
+
+      // Interpoliere vy
       const vy00 = vyNext[i00], vy10 = vyNext[i10];
       const vy01 = vyNext[i01], vy11 = vyNext[i11];
       const vyTop = vy00 * (1-fx) + vy10 * fx;
       const vyBot = vy01 * (1-fx) + vy11 * fx;
       const advVY = vyTop * (1-fy) + vyBot * fy;
-      
-      // Blend advected velocity with current (controls advection strength)
-      vxField[i] = clamp(((vxField[i] * 0.45) + (advVX * 0.55)) * velocityDecay | 0, -24000, 24000);
-      vyField[i] = clamp(((vyField[i] * 0.45) + (advVY * 0.55)) * velocityDecay | 0, -24000, 24000);
+
+      // Mische advektierte Velocity mit aktueller
+      vxField[i] = clamp(((vxField[i] * (1-advBlend)) + (advVX * advBlend)) * velocityDecay | 0, -24000, 24000);
+      vyField[i] = clamp(((vyField[i] * (1-advBlend)) + (advVY * advBlend)) * velocityDecay | 0, -24000, 24000);
     }
   }
 
-  // ===== 2c) DIVERGENCE → PRESSURE =====
-  // Keeps flow incompressible (fluid-like behavior)
-  const divK = 0.25;
+  // ===== PHASE 5: DIVERGENCE → PRESSURE =====
+  // Hält den Flow inkompressibel (fluid-ähnliches Verhalten)
+  const divK = 0.28;
   for (let ay=0; ay<aH; ay++) {
     for (let ax=0; ax<aW; ax++) {
       const i = aidx(ax,ay);
@@ -2223,12 +2243,12 @@ function updateAir(){
     }
   }
 
-  // ===== 3) OBSTACLES: Bouncing, Redirecting, Lee Zones =====
-  // Get dominant wind direction for lee-side calculations
+  // ===== PHASE 6: HINDERNISSE - Prallen, Umleiten, Schatten =====
+
+  // Dominante Windrichtung bestimmen (für Lee-Zone Berechnung)
   let dominantVX = globalVX, dominantVY = globalVY;
-  // Also consider local strong winds
   let totalVX = 0, totalVY = 0, sampleCount = 0;
-  for (let i = 0; i < vxField.length; i += 7) {
+  for (let i = 0; i < vxField.length; i += 5) {
     totalVX += vxField[i];
     totalVY += vyField[i];
     sampleCount++;
@@ -2241,84 +2261,126 @@ function updateAir(){
       dominantVY = avgVY;
     }
   }
-  
+
   const gMag = Math.hypot(dominantVX, dominantVY);
-  const wdx = gMag > 300 ? (dominantVX < 0 ? -1 : (dominantVX > 0 ? 1 : 0)) : 0;
-  const wdy = gMag > 300 ? (dominantVY < 0 ? -1 : (dominantVY > 0 ? 1 : 0)) : 0;
+  const wdx = gMag > 250 ? (dominantVX < 0 ? -1 : (dominantVX > 0 ? 1 : 0)) : 0;
+  const wdy = gMag > 250 ? (dominantVY < 0 ? -1 : (dominantVY > 0 ? 1 : 0)) : 0;
 
   for (let ay=0; ay<aH; ay++) {
     const row = ay*aW;
     for (let ax=0; ax<aW; ax++) {
       const i = row + ax;
       const sol = solidField[i];
-      
+
       if (sol > 0) {
-        // ===== OBSTACLE HIT =====
-        // Wind hitting solid: reduce velocity, increase pressure, redirect
-        const blockFactor = 1 - 0.28 * sol; // Strong blocking
+        // ===== HINDERNIS GETROFFEN =====
+        // Wind prallt: reduziert Velocity, erhöht Druck, leitet um
+        const blockFactor = 1 - 0.35 * sol; // VERSTÄRKT: stärkeres Blockieren
         const oldVX = vxField[i];
         const oldVY = vyField[i];
-        
-        // Reduce velocity at obstacle
+
+        // Velocity am Hindernis reduzieren
         vxField[i] = (oldVX * blockFactor) | 0;
         vyField[i] = (oldVY * blockFactor) | 0;
-        
-        // Pressure builds up in front of obstacles
-        pField[i] = clamp(pField[i] + (sol * 220), -30000, 30000);
-        
-        // ===== REDIRECT WIND AROUND OBSTACLE =====
-        // Push blocked wind to sides (creates flow around obstacles)
-        const blockedEnergy = (Math.abs(oldVX) + Math.abs(oldVY)) * 0.35 * sol;
-        
-        // Find perpendicular directions to redirect
+
+        // Druck staut sich vor Hindernissen
+        pField[i] = clamp(pField[i] + (sol * 280), -30000, 30000);
+
+        // ===== WIND UMLEITEN =====
+        // Blockierte Energie wird zur Seite gedrückt (Flow um Hindernisse)
+        const blockedEnergy = (Math.abs(oldVX) + Math.abs(oldVY)) * 0.45 * sol; // VERSTÄRKT
+
+        // Finde Richtung zum Umleiten (senkrecht zum Wind)
+        const magXY = Math.abs(oldVX) + Math.abs(oldVY) + 1;
+        const normX = oldVX / magXY;
+        const normY = oldVY / magXY;
+
+        // Umleitung in senkrechte Richtungen
         if (Math.abs(oldVX) > Math.abs(oldVY)) {
-          // Horizontal wind - redirect vertically
-          if (ay > 0) vyField[i-aW] = clamp(vyField[i-aW] - blockedEnergy * 0.5 | 0, -24000, 24000);
-          if (ay < aH-1) vyField[i+aW] = clamp(vyField[i+aW] + blockedEnergy * 0.5 | 0, -24000, 24000);
+          // Horizontaler Wind → vertikal umleiten
+          if (ay > 0) {
+            vyField[i-aW] = clamp(vyField[i-aW] - blockedEnergy * 0.6 | 0, -24000, 24000);
+            // Auch etwas horizontale Weiterleitung
+            vxField[i-aW] = clamp(vxField[i-aW] + (normX * blockedEnergy * 0.3)|0, -24000, 24000);
+          }
+          if (ay < aH-1) {
+            vyField[i+aW] = clamp(vyField[i+aW] + blockedEnergy * 0.6 | 0, -24000, 24000);
+            vxField[i+aW] = clamp(vxField[i+aW] + (normX * blockedEnergy * 0.3)|0, -24000, 24000);
+          }
         } else {
-          // Vertical wind - redirect horizontally
-          if (ax > 0) vxField[i-1] = clamp(vxField[i-1] - blockedEnergy * 0.5 | 0, -24000, 24000);
-          if (ax < aW-1) vxField[i+1] = clamp(vxField[i+1] + blockedEnergy * 0.5 | 0, -24000, 24000);
+          // Vertikaler Wind → horizontal umleiten
+          if (ax > 0) {
+            vxField[i-1] = clamp(vxField[i-1] - blockedEnergy * 0.6 | 0, -24000, 24000);
+            vyField[i-1] = clamp(vyField[i-1] + (normY * blockedEnergy * 0.3)|0, -24000, 24000);
+          }
+          if (ax < aW-1) {
+            vxField[i+1] = clamp(vxField[i+1] + blockedEnergy * 0.6 | 0, -24000, 24000);
+            vyField[i+1] = clamp(vyField[i+1] + (normY * blockedEnergy * 0.3)|0, -24000, 24000);
+          }
         }
         continue;
       }
 
-      // ===== LEE-SIDE SHADOWING (Wind Shadow) =====
-      // Areas behind obstacles get less wind
+      // ===== LEE-ZONE (Windschatten) =====
+      // Bereiche hinter Hindernissen bekommen weniger Wind
       if (wdx !== 0 || wdy !== 0) {
-        // Check multiple cells upwind for better shadow
         let shadowStrength = 0;
-        for (let dist = 1; dist <= 3; dist++) {
+        let shadowDist = 0;
+
+        // Prüfe mehrere Zellen windaufwärts
+        for (let dist = 1; dist <= 4; dist++) { // ERHÖHT: längerer Schatten
           const ux = ax - wdx * dist;
           const uy = ay - wdy * dist;
           if (ux >= 0 && uy >= 0 && ux < aW && uy < aH) {
             const upwindSol = solidField[aidx(ux,uy)];
             if (upwindSol > 0) {
-              // Shadow gets weaker with distance
-              shadowStrength = Math.max(shadowStrength, upwindSol * (1 - (dist-1) * 0.25));
+              // Schatten wird schwächer mit Distanz
+              const strength = upwindSol * (1 - (dist-1) * 0.22);
+              if (strength > shadowStrength) {
+                shadowStrength = strength;
+                shadowDist = dist;
+              }
             }
           }
         }
-        
+
         if (shadowStrength > 0) {
-          // Lee zone: reduced wind, can even have reverse flow
-          const leeFactor = 1 - 0.45 * shadowStrength;
+          // Lee-Zone: reduzierter Wind
+          const leeFactor = 1 - 0.55 * shadowStrength; // VERSTÄRKT
           vxField[i] = (vxField[i] * leeFactor) | 0;
           vyField[i] = (vyField[i] * leeFactor) | 0;
-          // Slight negative pressure in lee (suction)
-          pField[i] = clamp(pField[i] - (shadowStrength * 80)|0, -30000, 30000);
+
+          // Negativer Druck in der Lee-Zone (Sog)
+          pField[i] = clamp(pField[i] - (shadowStrength * 120)|0, -30000, 30000);
+
+          // Wirbelbildung in der Lee-Zone (bei starkem Wind)
+          if (gMag > 3000 && shadowDist === 2 && rnd() < 0.15) {
+            // Kleine Wirbel hinter Hindernissen
+            const vortexStr = shadowStrength * 400;
+            const vortexDir = (tick + ax + ay) & 1 ? 1 : -1;
+            if (Math.abs(wdx) > Math.abs(wdy)) {
+              vyField[i] = clamp(vyField[i] + vortexDir * vortexStr | 0, -24000, 24000);
+            } else {
+              vxField[i] = clamp(vxField[i] + vortexDir * vortexStr | 0, -24000, 24000);
+            }
+          }
         }
       }
 
-      // ===== VENTURI EFFECT =====
-      // Narrow channels accelerate flow
+      // ===== VENTURI-EFFEKT =====
+      // Enge Kanäle beschleunigen den Flow
       const left = ax>0 ? solidField[i-1] : 0;
       const right = ax<aW-1 ? solidField[i+1] : 0;
       const up = ay>0 ? solidField[i-aW] : 0;
       const down = ay<aH-1 ? solidField[i+aW] : 0;
-      if ((left>0 && right>0) || (up>0 && down>0)) {
-        vxField[i] = clamp((vxField[i] * 1.15) | 0, -24000, 24000);
-        vyField[i] = clamp((vyField[i] * 1.15) | 0, -24000, 24000);
+
+      // Horizontaler Kanal (oben und unten Wände)
+      if (up > 0 && down > 0 && left === 0 && right === 0) {
+        vxField[i] = clamp((vxField[i] * 1.22) | 0, -24000, 24000); // VERSTÄRKT
+      }
+      // Vertikaler Kanal (links und rechts Wände)
+      if (left > 0 && right > 0 && up === 0 && down === 0) {
+        vyField[i] = clamp((vyField[i] * 1.22) | 0, -24000, 24000);
       }
     }
   }
