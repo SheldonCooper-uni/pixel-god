@@ -1,0 +1,115 @@
+<!doctype html>
+<html lang="de">
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1" />
+  <title>Pixel God — Sandbox</title>
+  <link rel="stylesheet" href="ui.css" />
+</head>
+<body>
+  <div id="ui" role="presentation">
+    <div class="row">
+      <div class="group">
+        <span class="label">Tool</span>
+        <select id="tool">
+          <option value="paint">Material</option>
+          <option value="wind">Wind</option>
+          <option value="pressureSource">Druck +</option>
+          <option value="pressureSink">Druck -</option>
+          <option value="vortex">Wirbel</option>
+          <option value="temp">Temperatur</option>
+          <option value="erase">Radierer</option>
+          <option value="spawnHuman">Mensch</option>
+          <option value="spawnBird">Vogel</option>
+        </select>
+      </div>
+
+      <div class="group" id="matGroup">
+        <span class="label">Material</span>
+        <select id="material"></select>
+      </div>
+
+      <div class="group">
+        <span class="label">Pinsel</span>
+        <input id="brush" type="range" min="1" max="70" value="14" />
+        <span id="brushVal" class="value">14</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Stärke</span>
+        <input id="strength" type="range" min="-100" max="100" value="35" />
+        <span id="strengthVal" class="value">35</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Turbulenz</span>
+        <input id="turb" type="range" min="0" max="100" value="18" />
+        <span id="turbVal" class="value">18</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Wind-Winkel</span>
+        <input id="angle" type="range" min="0" max="360" value="0" />
+        <span id="angleVal" class="value">0°</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Global-Wind</span>
+        <input id="globalWindStrength" type="range" min="0" max="100" value="0" />
+        <span id="globalWindStrengthVal" class="value">0</span>
+        <input id="globalWindAngle" type="range" min="0" max="360" value="0" />
+        <span id="globalWindAngleVal" class="value">0°</span>
+      </div>
+
+      <div class="group">
+        <span class="label">Wind-Decay</span>
+        <input id="windDamp" type="range" min="80" max="99" value="93" />
+        <span id="windDampVal" class="value">0.93</span>
+      </div>
+
+      <label class="chk" title="Wenn an: Windrichtung aus Drag-Bewegung. Wenn aus: fester Winkel.">
+        <input id="windFromStroke" type="checkbox" checked />
+        <span>Drag-Richtung</span>
+      </label>
+
+      <label class="chk" title="Zeige Wind auch ohne Visualize-Modus.">
+        <input id="windOverlay" type="checkbox" />
+        <span>Wind-Overlay</span>
+      </label>
+
+      <label class="chk" title="Farbiges Wind-Overlay statt weißer Tracer.">
+        <input id="windOverlayColor" type="checkbox" />
+        <span>Overlay farbig</span>
+      </label>
+
+      <div class="group">
+        <span class="label">Qualität</span>
+        <select id="quality">
+          <option value="low">Low</option>
+          <option value="med" selected>Medium</option>
+          <option value="high">High</option>
+          <option value="ultra">Ultra</option>
+        </select>
+      </div>
+
+      <button id="clear" class="btn">Clear</button>
+      <button id="pause" class="btn">Pause</button>
+
+      <div class="group right">
+        <span class="pill">V: Wind-View</span>
+        <span class="pill">1–9: Quick</span>
+        <span class="pill">Shift: Linie</span>
+      </div>
+    </div>
+
+    <div class="row second">
+      <div class="hud" id="hud">…</div>
+      <div class="hud" id="hud2">…</div>
+    </div>
+  </div>
+
+  <canvas id="c"></canvas>
+
+  <script type="module" src="main.js"></script>
+</body>
+</html>
