@@ -231,39 +231,53 @@ export function isGasLike(t){
 
 // Wind coupling factor per element (0 = not affected, 1 = fully affected)
 // Determines how strongly wind pushes each material
+// Based on realistic wind physics - light materials fly, heavy stay put
 export const WIND_COUPLING = new Float32Array(256);
-// Very light (smoke, steam, ash, sparks) - fully affected
+
+// === VERY LIGHT (fully affected by any wind) ===
+// Smoke/Steam/Ash: 1.0 - fliegt bei jedem Windhauch
 WIND_COUPLING[E.SMOKE] = 1.0;
 WIND_COUPLING[E.STEAM] = 1.0;
-WIND_COUPLING[E.ASH] = 0.95;
-WIND_COUPLING[E.SPARK] = 0.90;
-WIND_COUPLING[E.FOAM] = 0.85;
+WIND_COUPLING[E.ASH] = 1.0;    // Erhöht: Asche ist sehr leicht
 WIND_COUPLING[E.GAS] = 1.0;
-WIND_COUPLING[E.CLOUD] = 0.70;
-WIND_COUPLING[E.FIRE] = 0.80;
-// Light particles - strongly affected
-WIND_COUPLING[E.SEED] = 0.75;
-WIND_COUPLING[E.ANT] = 0.55;
-WIND_COUPLING[E.FIREWORK] = 0.60;
-// Water surface - moderately affected (waves)
-WIND_COUPLING[E.WATER] = 0.30;
-WIND_COUPLING[E.OIL] = 0.25;
-WIND_COUPLING[E.ACID] = 0.28;
-WIND_COUPLING[E.SOAP] = 0.35;
-WIND_COUPLING[E.MUD] = 0.08;
-// Sand/dirt - only strong wind moves them
-WIND_COUPLING[E.SAND] = 0.18;
-WIND_COUPLING[E.DIRT] = 0.12;
-WIND_COUPLING[E.NITRO] = 0.20;
-// Heavy materials - very hard to move
-WIND_COUPLING[E.GRAVEL] = 0.04;
-WIND_COUPLING[E.LAVA] = 0.02;
-WIND_COUPLING[E.RUST] = 0.05;
-// Plants/organic - some sway
-WIND_COUPLING[E.PLANT] = 0.15;
-WIND_COUPLING[E.SPROUT] = 0.25;
-WIND_COUPLING[E.VINE] = 0.20;
-// Solids - essentially immovable by wind
+WIND_COUPLING[E.SPARK] = 0.95;
+WIND_COUPLING[E.FOAM] = 0.90;
+WIND_COUPLING[E.FIRE] = 0.85;  // Feuer flackert stark im Wind
+WIND_COUPLING[E.CLOUD] = 0.75;
+
+// === LIGHT PARTICLES (0.6-0.8) ===
+// Seeds/Insects: stark betroffen, aber nicht ganz so leicht wie Rauch
+WIND_COUPLING[E.SEED] = 0.70;
+WIND_COUPLING[E.ANT] = 0.65;   // Erhöht: Insekten werden vom Wind erfasst
+WIND_COUPLING[E.FIREWORK] = 0.65;
+
+// === WATER SURFACE (0.2-0.4) ===
+// Nur Oberfläche wird beeinflusst (Wellen)
+WIND_COUPLING[E.WATER] = 0.35;
+WIND_COUPLING[E.OIL] = 0.30;
+WIND_COUPLING[E.ACID] = 0.32;
+WIND_COUPLING[E.SOAP] = 0.38;
+WIND_COUPLING[E.MUD] = 0.10;
+
+// === SAND/DIRT (0.05-0.2) ===
+// Nur bei starkem Wind, sonst nur Bias
+WIND_COUPLING[E.SAND] = 0.15;
+WIND_COUPLING[E.DIRT] = 0.10;
+WIND_COUPLING[E.NITRO] = 0.18;
+WIND_COUPLING[E.RUST] = 0.06;
+
+// === HEAVY MATERIALS ===
+// Gravel: fast 0 - braucht Sturm
+WIND_COUPLING[E.GRAVEL] = 0.03;
+WIND_COUPLING[E.LAVA] = 0.01;  // Fast keine Bewegung
+
+// === PLANTS ===
+// Leichtes Schwanken im Wind
+WIND_COUPLING[E.PLANT] = 0.12;
+WIND_COUPLING[E.SPROUT] = 0.22;
+WIND_COUPLING[E.VINE] = 0.18;
+
+// === SOLIDS (immovable) ===
 WIND_COUPLING[E.STONE] = 0.0;
 WIND_COUPLING[E.WOOD] = 0.0;
 WIND_COUPLING[E.METAL] = 0.0;
