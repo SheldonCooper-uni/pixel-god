@@ -796,6 +796,44 @@ function powderStep(x,y,t){
       }
     }
 
+    // ===== SANDSTURM-EFFEKT =====
+    // Bei starkem Wind über exponiertem, trockenem Sand: Partikel werden aufgewirbelt
+    if (wetness < 50 && wmag > 6000 && exposedToWind) {
+      const liftChance = (wmag - 6000) / 80000;  // Je stärker Wind, desto mehr Aufwirbelung
+      if (rnd() < liftChance) {
+        // Sand wird aufgewirbelt und fliegt in Windrichtung
+        const targetX = x + windDir;
+        const targetY = y - 1;  // Nach oben
+        if (inb(targetX, targetY)) {
+          const ti = idx(targetX, targetY);
+          if (typeA[ti] === E.AIR) {
+            // Swap: Sand fliegt nach oben/seitlich
+            typeA[ti] = E.SAND;
+            dataA[ti] = 0;  // Trockener fliegender Sand
+            typeA[i] = E.AIR;
+            dataA[i] = 0;
+            markCellAndNeighbors(x, y);
+            markCellAndNeighbors(targetX, targetY);
+            return;
+          }
+        }
+      }
+
+      // Sandsturm erzeugt auch Staub (leichter Rauch-ähnlicher Effekt)
+      if (wmag > 10000 && rnd() < 0.003) {
+        const dustY = y - 1;
+        if (dustY >= 0) {
+          const di = idx(x, dustY);
+          if (typeA[di] === E.AIR) {
+            // Staub-Partikel (kurz sichtbarer Rauch)
+            typeA[di] = E.SMOKE;
+            dataA[di] = 15 + irand(20);  // Kurze Lebensdauer
+            markCellAndNeighbors(x, dustY);
+          }
+        }
+      }
+    }
+
     // Nasser Sand: schwerer, rutscht anders
     // wetness > 100 = schwerer (weniger Saltation)
     // Dies wird in den Bewegungs-Checks weiter unten berücksichtigt
@@ -1178,18 +1216,64 @@ function fluidStep(x,y,t){
 
   // supercooled water: triggers freeze on impurities/ice/pressure
   if (t===E.WATER) {
-    const temp = dataA[idx(x,y)]|0; // 128 = neutral
+    let temp = dataA[idx(x,y)]|0; // 128 = neutral
+    const ai = aidx(toAirX(x), toAirY(y));
+    const pressure = pField[ai] | 0;
+
+    // ===== WASSER-ABKÜHLUNG =====
+    // Kältequellen: niedrige Höhe (Atmosphäre), niedriger Druck, Schnee/Eis-Kontakt
+    let cooling = 0;
+
+    // Hohe Position = kältere Luft
+    if (y < H * 0.25) cooling += 2;
+    else if (y < H * 0.4) cooling += 1;
+
+    // Niedrigdruck = Kälte (wie in der echten Atmosphäre)
+    if (pressure < -3000) cooling += 2;
+    else if (pressure < -1500) cooling += 1;
+
+    // Schnee-Kontakt kühlt stark ab (Schnee = ASH mit dataA >= 200)
+    let nearSnow = false;
+    forNeighbors4(x, y, (nx, ny) => {
+      const ni = idx(nx, ny);
+      if (typeA[ni] === E.ASH && dataA[ni] >= 200) {
+        cooling += 3;
+        nearSnow = true;
+      } else if (typeA[ni] === E.ICE) {
+        cooling += 2;
+      }
+    });
+
+    // Wasser wird langsam kühler
+    if (cooling > 0 && (tick & 3) === 0) {
+      temp = Math.max(50, temp - cooling);
+      dataA[idx(x,y)] = temp;
+    }
+
+    // Wärme-Quellen wärmen Wasser auf
+    if (hasNeighborOfType(x,y,E.FIRE) || hasNeighborOfType(x,y,E.LAVA)) {
+      temp = Math.min(200, temp + 8);
+      dataA[idx(x,y)] = temp;
+    }
+
     const supercooled = temp < 110;
     if (supercooled) {
-      const ai = aidx(toAirX(x), toAirY(y));
-      const p = pField[ai] | 0;
-      if (hasNeighborOfType(x,y,E.ICE) || hasNeighborOfType(x,y,E.SAND) || hasNeighborOfType(x,y,E.ASH) || hasNeighborOfType(x,y,E.DIRT)) {
+      // Gefrieren bei Kontakt mit Kern (Eis, Sand, Schnee, Schmutz)
+      if (hasNeighborOfType(x,y,E.ICE) || hasNeighborOfType(x,y,E.SAND) || hasNeighborOfType(x,y,E.DIRT) || nearSnow) {
         typeA[idx(x,y)] = E.ICE;
         dataA[idx(x,y)] = 0;
         markCellAndNeighbors(x,y);
         return;
       }
-      if (Math.abs(p) > 12000 && rnd() < 0.35) {
+      // Druckinduziertes Gefrieren
+      if (Math.abs(pressure) > 12000 && rnd() < 0.35) {
+        typeA[idx(x,y)] = E.ICE;
+        dataA[idx(x,y)] = 0;
+        markCellAndNeighbors(x,y);
+        return;
+      }
+      // Sehr kaltes Wasser gefriert spontan
+      if (temp < 65 && rnd() < 0.02) {
         typeA[idx(x,y)] = E.ICE;
         dataA[idx(x,y)] = 0;
         markCellAndNeighbors(x,y);
@@ -3325,9 +3409,35 @@ function updatePixelsForChunk(cx,cy){
           }
         }
       }
-      if (t===E.PLANT || t===E.SPROUT) {
+      if (t===E.PLANT || t===E.SPROUT || t===E.VINE) {
         const age = dataA[i];
         col = blend(col, 0xff26ff7a, clamp(age/180,0,1)*0.25);
+
+        // ===== WIND-SCHWANKEN VISUALISIERUNG =====
+        const vx = sampleAirVX(x, y);
+        const vy = sampleAirVY(x, y);
+        const windMag = Math.abs(vx) + Math.abs(vy) * 0.3;
+
+        if (windMag > 800) {
+          // Hellere Seite (Wind-zugewandt) vs dunklere Seite (Wind-abgewandt)
+          const windDir = vx > 0 ? 1 : -1;
+          const swayPhase = Math.sin(x * 0.3 + y * 0.15 + tick * 0.12 * (1 + windMag/5000));
+          const swayAmount = clamp(windMag / 8000, 0, 1);
+
+          // Dynamische Farbverschiebung basierend auf Schwankungsphase
+          if (swayPhase > 0.2) {
+            // Heller - wie von Sonne getroffen
+            col = blend(col, 0xff80ffa0, 0.20 * swayAmount * swayPhase);
+          } else if (swayPhase < -0.2) {
+            // Dunkler - Schattenseite
+            col = blend(col, 0xff205030, 0.25 * swayAmount * (-swayPhase));
+          }
+
+          // Bei starkem Wind: "Blätter-Rauschen" Effekt
+          if (windMag > 4000 && rnd() < 0.08 * swayAmount) {
+            col = blend(col, 0xff60ff80, 0.35);
+          }
+        }
       }
       // === NEW ELEMENT VISUALS ===
       if (t===E.ACID) {
