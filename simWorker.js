@@ -699,12 +699,36 @@ function powderStep(x,y,t){
   const i = idx(x,y);
   const windDir = vx < 0 ? -1 : (vx > 0 ? 1 : 0);
 
-  // sand + water -> mud
+  // ===== WET SAND SYSTEM =====
+  // Sand nimmt Feuchtigkeit auf (wetness), bleibt aber Sand
+  // Erst bei hoher wetness UND längerem Wasserkontakt -> Mud
+  // dataA für Sand: wetness (0-255)
   if (t===E.SAND) {
-    if (hasNeighborOfType(x,y,E.WATER) && rnd()<0.02) {
-      setCell(x,y,E.MUD, 150);
-      return;
+    let wetness = dataA[i] | 0;
+    const hasWater = hasNeighborOfType(x,y,E.WATER);
+
+    if (hasWater) {
+      // Sand absorbiert Wasser langsam
+      wetness = Math.min(255, wetness + 3);
+      dataA[i] = wetness;
+
+      // Nur wenn SEHR nass UND lange im Wasser -> Mud
+      // threshold = 200, chance nur 0.8% pro Tick
+      if (wetness > 200 && rnd() < 0.008) {
+        setCell(x,y,E.MUD, 150);
+        return;
+      }
+    } else {
+      // Sand trocknet langsam aus (ohne Wasser)
+      if (wetness > 0 && (tick & 7) === 0) {
+        wetness = Math.max(0, wetness - 1);
+        dataA[i] = wetness;
+      }
     }
+
+    // Nasser Sand: schwerer, rutscht anders
+    // wetness > 100 = schwerer (weniger Saltation)
+    // Dies wird in den Bewegungs-Checks weiter unten berücksichtigt
   }
 
   // NITRO - extrem instabil!
@@ -1298,38 +1322,99 @@ function gasStep(x,y,t){
   }
 
   if (t === E.CLOUD) {
+    // ===== WETTER-LIFECYCLE =====
+    // dataA encoding: bits 0-6 = waterContent (0-127), bit 7 = charged flag
+    // Charge builds separately over time when conditions met
     const mass = cloudMassLocal || cloudMass(x,y);
-    const charge = dataA[i] | 0;
     const ai = aidx(toAirX(x), toAirY(y));
-    const updraft = (vyField[ai] < -1800) || (pField[ai] < -2500);
-    if (mass >= 5) dataA[i] = clamp(charge + 2 + irand(3) + (updraft ? 2 : 0), 0, 255);
-    else dataA[i] = Math.max(0, charge - 1);
+    const rawData = dataA[i] | 0;
 
-    // rain
-    if (mass >= 6 && dataA[i] > 120 && rnd() < 0.04) {
-      const by = y+1;
-      if (by < H) {
-        const bi = idx(x,by);
-        if (typeA[bi]===E.AIR || typeA[bi]===E.SMOKE || typeA[bi]===E.STEAM) {
-          typeA[bi]=E.WATER; dataA[bi]=128;
-          markCellAndNeighbors(x,by);
-          dataA[i] = Math.max(0, dataA[i] - 20);
+    // Extract waterContent and charged state
+    let waterContent = rawData & 0x7F;  // 0-127
+    let charged = (rawData >> 7) & 1;
+
+    const updraft = (vyField[ai] < -1800) || (pField[ai] < -2500);
+    const pressure = pField[ai] | 0;
+
+    // ===== WATER CONTENT DYNAMICS =====
+    // Wolken bekommen Wasser aus Dampf/Feuchtigkeit
+    if (mass >= 4 && updraft) {
+      // Updraft bringt Feuchtigkeit
+      waterContent = Math.min(127, waterContent + 1 + irand(2));
+    } else if (mass >= 6) {
+      // Große Wolken sammeln Feuchtigkeit
+      waterContent = Math.min(127, waterContent + irand(2));
+    }
+
+    // Wolken verlieren langsam Wasser ohne Nachschub
+    if (mass < 3 && (tick & 7) === 0) {
+      waterContent = Math.max(0, waterContent - 1);
+    }
+
+    // ===== GEWITTER BRAUCHT 3 BEDINGUNGEN =====
+    // 1. cloudMass > 5  2. updraft vorhanden  3. waterContent hoch
+    const stormConditions =
+      mass >= 6 &&
+      updraft &&
+      waterContent > 80;
+
+    // Charge builds slowly when storm conditions met
+    if (stormConditions) {
+      if (!charged && rnd() < 0.08) {
+        charged = 1;  // Cloud becomes charged
+      }
+    } else {
+      // Storm conditions not met - slowly discharge
+      if (charged && rnd() < 0.02) {
+        charged = 0;
+      }
+    }
+
+    // ===== REGEN - entlädt waterContent =====
+    // Regen nur wenn genug Wasser UND Masse
+    const rainThreshold = 60 + (mass < 5 ? 30 : 0);
+    if (waterContent > rainThreshold && mass >= 4) {
+      const rainChance = 0.02 + (waterContent - rainThreshold) * 0.0005;
+      if (rnd() < rainChance) {
+        const by = y + 1;
+        if (by < H) {
+          const bi = idx(x, by);
+          const bt = typeA[bi];
+          if (bt === E.AIR || bt === E.SMOKE || bt === E.STEAM) {
+            typeA[bi] = E.WATER;
+            dataA[bi] = 128;
+            markCellAndNeighbors(x, by);
+            // Regen entlädt waterContent
+            waterContent = Math.max(0, waterContent - 15 - irand(10));
+            // Nach Regen: updraft wird gedämpft
+            vyField[ai] = (vyField[ai] * 0.85) | 0;
+          }
         }
       }
     }
 
-    // lightning
-    if (mass >= 6 && dataA[i] > 200 && rnd() < 0.012) {
-      strikeLightning(x,y);
-      dataA[i] = Math.max(0, dataA[i] - 80);
+    // ===== BLITZ - nur wenn charged UND alle Bedingungen =====
+    if (charged && mass >= 6 && waterContent > 70 && rnd() < 0.015) {
+      strikeLightning(x, y);
+      // Blitz entlädt die Wolke stark
+      waterContent = Math.max(0, waterContent - 40);
+      charged = 0;  // Reset charge
+      // Updraft wird durch Blitz gestört
+      vyField[ai] = (vyField[ai] * 0.6) | 0;
+      pField[ai] = clamp(pField[ai] - 800, -30000, 30000);
     }
 
-    // gentle evaporation when isolated
-    if (mass <= 1 && dataA[i] < 10 && rnd() < 0.01) {
-      typeA[i]=E.STEAM; dataA[i]=90+irand(40);
-      markCellAndNeighbors(x,y);
+    // ===== WOLKE LÖST SICH AUF =====
+    // Wenn waterContent zu niedrig UND isoliert
+    if (waterContent < 15 && mass <= 2 && rnd() < 0.015) {
+      typeA[i] = E.STEAM;
+      dataA[i] = 90 + irand(40);
+      markCellAndNeighbors(x, y);
       return;
     }
+
+    // Save data back
+    dataA[i] = (waterContent & 0x7F) | (charged << 7);
   }
 }
 
@@ -1418,89 +1503,173 @@ function fireAndLifeCell(x,y){
   }
 
   if (t===E.SEED) {
-    // seed germination
-    const belowY = y+1;
-    if (belowY < H) {
-      const bi = idx(x,belowY);
-      if (typeA[bi]===E.DIRT) {
-        const moist = dataA[bi];
-        const age = dataA[i];
-        if (moist > 40 || hasNeighborOfType(x,y,E.WATER)) {
-          const age2 = Math.min(255, age + 1);
-          dataA[i] = age2;
-          if (age2 > 35 && rnd()<0.25) {
-            typeA[i] = E.SPROUT;
-            dataA[i] = 0;
-          }
-          markCellAndNeighbors(x,y);
+    // ===== SAMEN-KEIMUNG MIT FEEDBACK =====
+    // dataA encoding: bits 0-6 = age/progress, bit 7 = germinating flag
+    const rawData = dataA[i] | 0;
+    let age = rawData & 0x7F;
+    let germinating = (rawData >> 7) & 1;
+
+    const belowY = y + 1;
+    const hasDirtBelow = belowY < H && typeA[idx(x, belowY)] === E.DIRT;
+    const hasWater = hasNeighborOfType(x, y, E.WATER);
+    const moist = hasDirtBelow ? dataA[idx(x, belowY)] : 0;
+
+    // Bedingungen für Keimung
+    const canGerminate = hasDirtBelow && (moist > 35 || hasWater);
+
+    if (canGerminate) {
+      germinating = 1;  // Zeigt "ich arbeite"
+      age = Math.min(127, age + 1 + (hasWater ? 1 : 0));
+
+      // Schnellere Keimung mit mehr Wasser
+      const germThreshold = hasWater ? 25 : 40;
+      const germChance = hasWater ? 0.35 : 0.20;
+
+      if (age > germThreshold && rnd() < germChance) {
+        typeA[i] = E.SPROUT;
+        dataA[i] = 0;
+        // Verbrauche etwas Feuchtigkeit
+        if (hasDirtBelow) {
+          dataA[idx(x, belowY)] = Math.max(0, dataA[idx(x, belowY)] - 5);
         }
+      } else {
+        dataA[i] = (age & 0x7F) | (germinating << 7);
       }
+      markCellAndNeighbors(x, y);
+    } else {
+      // Nicht keimend - Samen trocknet langsam / stirbt
+      germinating = 0;
+      if (age > 0 && (tick & 15) === 0) {
+        age = Math.max(0, age - 1);  // Fortschritt geht verloren
+      }
+      // Nach langer Zeit ohne Bedingungen: Samen stirbt
+      if (age === 0 && rawData > 0 && rnd() < 0.005) {
+        typeA[i] = E.ASH;  // Toter Samen
+        dataA[i] = 0;
+        markCellAndNeighbors(x, y);
+        return;
+      }
+      dataA[i] = (age & 0x7F) | (germinating << 7);
     }
   }
 
   if (t===E.SPROUT || t===E.PLANT) {
+    // ===== PFLANZENWACHSTUM MIT FEEDBACK =====
     let age = dataA[i];
     const moist = bestNeighborMoisture(x,y);
     const hasWater = hasNeighborOfType(x,y,E.WATER);
+    const hasFire = hasNeighborOfType(x,y,E.FIRE);
 
-    if (moist > 25 || hasWater) {
-      if (rnd() < 0.7) age = Math.min(255, age + 1);
-      // consume a bit of moisture from below dirt
+    // Wachstum bei guten Bedingungen
+    if (moist > 20 || hasWater) {
+      // Schnelleres Wachstum mit direktem Wasserkontakt
+      const growthRate = hasWater ? 2 : 1;
+      if (rnd() < 0.75) age = Math.min(255, age + growthRate);
+
+      // Verbrauche Feuchtigkeit aus Erde
       if ((tick & 3) === 0) {
-        const by = y+1;
+        const by = y + 1;
         if (by < H) {
-          const bi = idx(x,by);
-          if (typeA[bi]===E.DIRT && dataA[bi]>0 && rnd()<0.35) dataA[bi]--;
+          const bi = idx(x, by);
+          if (typeA[bi] === E.DIRT && dataA[bi] > 0 && rnd() < 0.35) {
+            dataA[bi] = Math.max(0, dataA[bi] - 1);
+          }
         }
+      }
+    } else {
+      // Ohne Wasser: langsames Welken
+      if ((tick & 7) === 0 && age > 0) {
+        age = Math.max(0, age - 1);
       }
     }
 
-    // upgrade sprout -> plant
-    if (t===E.SPROUT && age > 20) {
+    // Feuer in der Nähe: schneller sterben
+    if (hasFire && rnd() < 0.15) {
+      typeA[i] = E.FIRE;
+      dataA[i] = 60 + irand(80);
+      markCellAndNeighbors(x, y);
+      return;
+    }
+
+    // Upgrade Sprout -> Plant
+    if (t === E.SPROUT && age > 20) {
       typeA[i] = E.PLANT;
       age = 30;
     }
 
     dataA[i] = age;
 
-    // grow upward
-    if (age > 15 && rnd() < 0.10) {
-      const upY = y-1;
+    // Nach oben wachsen
+    if (age > 15 && rnd() < 0.12) {
+      const upY = y - 1;
       if (upY >= 0) {
-        const ui = idx(x,upY);
-        if (typeA[ui]===E.AIR) {
+        const ui = idx(x, upY);
+        if (typeA[ui] === E.AIR) {
           typeA[ui] = E.PLANT;
           dataA[ui] = 15;
-          markCellAndNeighbors(x,upY);
+          markCellAndNeighbors(x, upY);
         }
       }
     }
 
-    // occasional trunk
-    if (t===E.PLANT && age > 120 && rnd() < 0.02) {
+    // Zu Holz werden
+    if (t === E.PLANT && age > 120 && rnd() < 0.02) {
       typeA[i] = E.WOOD;
       dataA[i] = 0;
-      markCellAndNeighbors(x,y);
+      markCellAndNeighbors(x, y);
     }
 
-    // die if too dry
-    if (age > 10 && moist < 8 && !hasWater && rnd()<0.01) {
+    // Sterben wenn zu trocken
+    if (age < 5 && moist < 8 && !hasWater && rnd() < 0.015) {
       typeA[i] = E.ASH;
       dataA[i] = 0;
-      markCellAndNeighbors(x,y);
+      markCellAndNeighbors(x, y);
     }
   }
 
   if (t===E.LAVA) {
-    // lava interactions
-    if (hasNeighborOfType(x,y,E.WATER) && rnd()<0.35) {
-      // cool to stone or gravel depending on quench speed
+    // ===== LAVA-PHYSIK (realistisch) =====
+    // dataA für Lava: bits 0-6 = Hitze (0-127), bit 7 = Kruste flag
+    const rawData = dataA[i] | 0;
+    let heat = rawData & 0x7F;       // 0-127
+    let crusted = (rawData >> 7) & 1;
+
+    // ===== HITZE-VERLUST (Lava kühlt langsam ab) =====
+    // Schneller wenn an Luft, langsamer wenn umgeben von Lava
+    const lavaNeighbors = countNeighbors8(x,y,E.LAVA);
+    const hasAir = hasNeighborOfType(x,y,E.AIR);
+    const hasWater = hasNeighborOfType(x,y,E.WATER);
+
+    if (hasAir && lavaNeighbors < 4) {
+      // An der Oberfläche: kühlt schneller
+      heat = Math.max(0, heat - 1 - (crusted ? 0 : irand(2)));
+    } else if (lavaNeighbors >= 6) {
+      // Umgeben von Lava: bleibt heiß
+      heat = Math.min(127, heat + irand(2));
+    }
+
+    // ===== KRUSTE BILDEN =====
+    // Wenn Hitze sinkt UND an Oberfläche -> Kruste
+    if (!crusted && heat < 50 && hasAir && rnd() < 0.08) {
+      crusted = 1;
+    }
+    // Kruste kann aufbrechen bei hoher Hitze von unten
+    if (crusted && heat > 90 && rnd() < 0.05) {
+      crusted = 0;
+    }
+
+    // ===== WASSER-INTERAKTION (Steam + Stone/Gravel + Shockwave) =====
+    if (hasWater && rnd() < 0.40) {
       let waterCount = 0;
       forNeighbors4(x,y,(nx,ny)=>{ if (typeA[idx(nx,ny)]===E.WATER) waterCount++; });
-      const fastQuench = waterCount >= 2 || rnd() < 0.5;
+
+      // Schnelle Abkühlung = mehr Steam & Gravel (pumice)
+      const fastQuench = waterCount >= 2 || heat > 80;
       typeA[i] = fastQuench ? E.GRAVEL : E.STONE;
       dataA[i] = 0;
       markCellAndNeighbors(x,y);
+
+      // Wasser zu Steam
       forNeighbors4(x,y,(nx,ny)=>{
         const ni = idx(nx,ny);
         if (typeA[ni]===E.WATER) {
@@ -1509,19 +1678,67 @@ function fireAndLifeCell(x,y){
           markCellAndNeighbors(nx,ny);
         }
       });
+
+      // Druckstoß (stärker bei mehr Wasser)
       const ai = aidx(toAirX(x), toAirY(y));
-      pField[ai] = clamp(pField[ai] + (fastQuench ? 1800 : 1200), -30000, 30000);
+      const shockStrength = fastQuench ? 2200 + waterCount * 400 : 1200;
+      pField[ai] = clamp(pField[ai] + shockStrength, -30000, 30000);
+      applyShockwave(x, y, shockStrength / 2);
+      return;
     }
-    if (hasNeighborBurnable(x,y) && rnd()<0.20) {
-      // ignite adjacent burnables
-      forNeighbors4(x,y,(nx,ny)=>{
-        const ni = idx(nx,ny);
-        if (IS_BURNABLE[typeA[ni]] && rnd()<0.35) {
-          typeA[ni]=E.FIRE; dataA[ni]=70+irand(80);
-          markCellAndNeighbors(nx,ny);
-        }
-      });
+
+    // ===== KONTAKT-EFFEKTE (Sand/Earth/Stone erhitzen) =====
+    forNeighbors4(x,y,(nx,ny)=>{
+      const ni = idx(nx,ny);
+      const nt = typeA[ni];
+
+      // Sand -> Glass (bei hoher Hitze)
+      if (nt === E.SAND && heat > 80 && rnd() < 0.04) {
+        typeA[ni] = E.STONE;  // Verwende Stone als "Glass"
+        dataA[ni] = 0;
+        markCellAndNeighbors(nx,ny);
+      }
+
+      // Dirt -> "gebackene Erde" (Stone)
+      if (nt === E.DIRT && heat > 60 && rnd() < 0.02) {
+        typeA[ni] = E.GRAVEL;  // Gebackene Erde = Kiesel
+        dataA[ni] = 0;
+        markCellAndNeighbors(nx,ny);
+      }
+
+      // Ice -> Water -> Steam schnell
+      if (nt === E.ICE && rnd() < 0.25) {
+        typeA[ni] = E.STEAM;
+        dataA[ni] = 80 + irand(60);
+        markCellAndNeighbors(nx,ny);
+      }
+
+      // Burnable -> Fire
+      if (IS_BURNABLE[nt] && !crusted && rnd() < 0.25) {
+        typeA[ni] = E.FIRE;
+        dataA[ni] = 70 + irand(80);
+        markCellAndNeighbors(nx,ny);
+      }
+    });
+
+    // ===== ERSTARREN (wenn zu kalt) =====
+    if (heat < 15 && rnd() < 0.03) {
+      // Kalte Lava wird zu Stone
+      typeA[i] = crusted ? E.STONE : E.GRAVEL;
+      dataA[i] = 0;
+      markCellAndNeighbors(x,y);
+      return;
     }
+
+    // Hitze-Ausstrahlung (erwärmt Luft)
+    if (!crusted && heat > 50) {
+      const ai = aidx(toAirX(x), toAirY(y));
+      pField[ai] = clamp(pField[ai] + 80 + heat, -30000, 30000);
+      vyField[ai] = clamp(vyField[ai] - 200, -24000, 24000); // Aufwärtsdrift
+    }
+
+    // Speichere Daten
+    dataA[i] = (heat & 0x7F) | (crusted << 7);
   }
 
   if (t===E.ICE) {
@@ -1956,18 +2173,35 @@ function cloudMass(x,y){
   return count;
 }
 
-function findLightningTarget(x,y){
-  let bestX = x|0;
+function findLightningTarget(x, y) {
+  // ===== BLITZ-ZIEL FINDEN =====
+  // Zieht zu: Metall > Wasser > hohe Punkte > Solids
+  let bestX = x | 0;
   let bestScore = 1e9;
   let bestY = H;
-  const radius = 7;
-  for (let dx=-radius; dx<=radius; dx++) {
-    const xx = clamp(x+dx, 0, W-1);
-    for (let yy=y+1; yy<H; yy++) {
-      const t = typeA[idx(xx,yy)];
-      if (t===E.AIR || t===E.SMOKE || t===E.STEAM || t===E.CLOUD) continue;
-      const isSolid = IS_SOLID[t] || t===E.WOOD;
-      const score = yy + Math.abs(dx)*2 + (isSolid ? -6 : 0);
+  const radius = 12;  // Erhöht für bessere Reichweite
+
+  for (let dx = -radius; dx <= radius; dx++) {
+    const xx = clamp(x + dx, 0, W - 1);
+    for (let yy = y + 1; yy < H; yy++) {
+      const t = typeA[idx(xx, yy)];
+      if (t === E.AIR || t === E.SMOKE || t === E.STEAM || t === E.CLOUD) continue;
+
+      // Scoring: niedriger = besser
+      let score = yy + Math.abs(dx) * 1.5;  // Basis: Distanz
+
+      // METALL: stark bevorzugt (Blitzableiter!)
+      if (t === E.METAL) score -= 25;
+
+      // WASSER: leitet gut
+      else if (t === E.WATER || t === E.ACID) score -= 12;
+
+      // Hohe Punkte (Bäume/Gebäude)
+      else if (IS_SOLID[t] || t === E.WOOD) score -= 8;
+
+      // Höhe bonus (höhere Objekte ziehen mehr an)
+      if (yy < y + 30) score -= (30 - (yy - y)) * 0.3;
+
       if (score < bestScore) {
         bestScore = score;
         bestX = xx;
@@ -1999,69 +2233,160 @@ function applyShockwave(cx,cy,strength=2400){
   }
 }
 
-function strikeLightning(x,y){
-  let lx = x|0;
-  let ly = y|0;
-  const target = findLightningTarget(x,y);
-  const maxSteps = H - ly - 1;
-  for (let s=0; s<maxSteps; s++) {
-    // steer toward target with jitter
-    const dx = target.x - lx;
-    if (dx !== 0 && rnd() < 0.72) {
-      lx = clamp(lx + (dx > 0 ? 1 : -1), 0, W-1);
-    } else {
-      lx = clamp(lx + (irand(3)-1), 0, W-1);
-    }
-    ly = clamp(ly + 1, 0, H-1);
-    const i = idx(lx,ly);
-    const t = typeA[i];
+function strikeLightning(x, y) {
+  // ===== BLITZ MIT VERZWEIGUNGEN =====
+  // Hauptstrahl + mögliche Seitenäste
+  const branches = [{ x: x | 0, y: y | 0, active: true, main: true }];
+  const target = findLightningTarget(x, y);
+  const maxSteps = Math.min(H - y, 120);
 
-    if (t===E.WATER) {
-      typeA[i]=E.STEAM; dataA[i]=60+irand(60);
-      markCellAndNeighbors(lx,ly);
-      applyShockwave(lx,ly, 2600);
-      for (let dy=-2; dy<=2; dy++) for (let dx2=-2; dx2<=2; dx2++) {
-        if (dx2*dx2 + dy*dy < 3 || dx2*dx2 + dy*dy > 7) continue;
-        const nx = lx+dx2, ny = ly+dy;
-        if (!inb(nx,ny)) continue;
-        const ni = idx(nx,ny);
-        if (typeA[ni]===E.AIR || typeA[ni]===E.SMOKE || typeA[ni]===E.STEAM) {
-          typeA[ni]=E.SPARK; dataA[ni]=10+irand(12);
-          markCellAndNeighbors(nx,ny);
-        }
+  // Verzweigungs-Chancen
+  const BRANCH_CHANCE = 0.08;
+  const MAX_BRANCHES = 4;
+
+  for (let s = 0; s < maxSteps && branches.some(b => b.active); s++) {
+    for (let bi = 0; bi < branches.length; bi++) {
+      const b = branches[bi];
+      if (!b.active) continue;
+
+      // ===== BEWEGUNG MIT JITTER =====
+      const dx = target.x - b.x;
+      const steerChance = b.main ? 0.72 : 0.55;  // Hauptstrahl zielt genauer
+
+      if (dx !== 0 && rnd() < steerChance) {
+        b.x = clamp(b.x + (dx > 0 ? 1 : -1), 0, W - 1);
+      } else {
+        // Zufällige Abweichung (mehr bei Nebenästen)
+        const jitter = b.main ? irand(3) - 1 : irand(5) - 2;
+        b.x = clamp(b.x + jitter, 0, W - 1);
       }
-      break;
-    }
-    if (IS_SOLID[t]) {
-      // impact pressure burst
-      const ai = aidx(toAirX(lx), toAirY(ly));
-      pField[ai] = clamp(pField[ai] + 2400, -30000, 30000);
-      applyShockwave(lx,ly, 2800);
-      for (let dy=-2; dy<=2; dy++) for (let dx2=-2; dx2<=2; dx2++) {
-        if (dx2*dx2 + dy*dy < 3 || dx2*dx2 + dy*dy > 7) continue;
-        const nx = lx+dx2, ny = ly+dy;
-        if (!inb(nx,ny)) continue;
-        const ni = idx(nx,ny);
-        if (typeA[ni]===E.AIR || typeA[ni]===E.SMOKE || typeA[ni]===E.STEAM) {
-          typeA[ni]=E.SPARK; dataA[ni]=10+irand(12);
-          markCellAndNeighbors(nx,ny);
-        }
+      b.y = clamp(b.y + 1, 0, H - 1);
+
+      const i = idx(b.x, b.y);
+      const t = typeA[i];
+
+      // ===== VERZWEIGUNG ERSTELLEN =====
+      if (b.main && branches.length < MAX_BRANCHES && rnd() < BRANCH_CHANCE) {
+        const branchDir = rnd() < 0.5 ? -1 : 1;
+        branches.push({
+          x: clamp(b.x + branchDir * 2, 0, W - 1),
+          y: b.y,
+          active: true,
+          main: false
+        });
       }
-      break;
-    }
 
-    if (t===E.AIR || t===E.SMOKE || t===E.STEAM || t===E.CLOUD) {
-      if (rnd()<0.65) { typeA[i]=E.SPARK; dataA[i]=10+irand(12); }
-      else if (rnd()<0.30) { typeA[i]=E.FIRE; dataA[i]=50+irand(70); }
-      markCellAndNeighbors(lx,ly);
-    } else if (IS_BURNABLE[t]) {
-      typeA[i]=E.FIRE; dataA[i]=70+irand(80);
-      markCellAndNeighbors(lx,ly);
-    }
+      // ===== WASSER GETROFFEN =====
+      if (t === E.WATER) {
+        typeA[i] = E.STEAM;
+        dataA[i] = 60 + irand(60);
+        markCellAndNeighbors(b.x, b.y);
 
-    // pressure shock along path
-    const ai = aidx(toAirX(lx), toAirY(ly));
-    pField[ai] = clamp(pField[ai] + 900, -30000, 30000);
+        // Wasser leitet Blitz weiter - extra Sparks!
+        const spreadRadius = b.main ? 4 : 2;
+        applyShockwave(b.x, b.y, b.main ? 3200 : 1800);
+
+        for (let dy = -spreadRadius; dy <= spreadRadius; dy++) {
+          for (let dx2 = -spreadRadius; dx2 <= spreadRadius; dx2++) {
+            const d2 = dx2 * dx2 + dy * dy;
+            if (d2 < 2 || d2 > spreadRadius * spreadRadius) continue;
+            const nx = b.x + dx2, ny = b.y + dy;
+            if (!inb(nx, ny)) continue;
+            const ni = idx(nx, ny);
+            const nt = typeA[ni];
+            if (nt === E.WATER && rnd() < 0.4) {
+              typeA[ni] = E.STEAM;
+              dataA[ni] = 50 + irand(50);
+              markCellAndNeighbors(nx, ny);
+            } else if (nt === E.AIR || nt === E.SMOKE || nt === E.STEAM) {
+              typeA[ni] = E.SPARK;
+              dataA[ni] = 10 + irand(15);
+              markCellAndNeighbors(nx, ny);
+            }
+          }
+        }
+        b.active = false;
+        continue;
+      }
+
+      // ===== METALL GETROFFEN (leitet perfekt) =====
+      if (t === E.METAL) {
+        // Metall absorbiert den Blitz, starke Shockwave
+        applyShockwave(b.x, b.y, b.main ? 3500 : 2000);
+        const ai = aidx(toAirX(b.x), toAirY(b.y));
+        pField[ai] = clamp(pField[ai] + 3000, -30000, 30000);
+
+        // Sparks fliegen vom Metall weg
+        for (let dy = -3; dy <= 3; dy++) {
+          for (let dx2 = -3; dx2 <= 3; dx2++) {
+            if (dx2 === 0 && dy === 0) continue;
+            const nx = b.x + dx2, ny = b.y + dy;
+            if (!inb(nx, ny)) continue;
+            const ni = idx(nx, ny);
+            if ((typeA[ni] === E.AIR || typeA[ni] === E.SMOKE) && rnd() < 0.5) {
+              typeA[ni] = E.SPARK;
+              dataA[ni] = 15 + irand(20);
+              markCellAndNeighbors(nx, ny);
+            }
+          }
+        }
+        b.active = false;
+        continue;
+      }
+
+      // ===== ANDERES SOLID GETROFFEN =====
+      if (IS_SOLID[t]) {
+        const ai = aidx(toAirX(b.x), toAirY(b.y));
+        pField[ai] = clamp(pField[ai] + 2400, -30000, 30000);
+        applyShockwave(b.x, b.y, b.main ? 2800 : 1500);
+
+        for (let dy = -2; dy <= 2; dy++) {
+          for (let dx2 = -2; dx2 <= 2; dx2++) {
+            const d2 = dx2 * dx2 + dy * dy;
+            if (d2 < 2 || d2 > 8) continue;
+            const nx = b.x + dx2, ny = b.y + dy;
+            if (!inb(nx, ny)) continue;
+            const ni = idx(nx, ny);
+            if (typeA[ni] === E.AIR || typeA[ni] === E.SMOKE || typeA[ni] === E.STEAM) {
+              typeA[ni] = E.SPARK;
+              dataA[ni] = 10 + irand(12);
+              markCellAndNeighbors(nx, ny);
+            }
+          }
+        }
+        b.active = false;
+        continue;
+      }
+
+      // ===== DURCH LUFT/GASE =====
+      if (t === E.AIR || t === E.SMOKE || t === E.STEAM || t === E.CLOUD) {
+        // Hauptstrahl: mehr Feuer/Sparks
+        const sparkChance = b.main ? 0.70 : 0.45;
+        const fireChance = b.main ? 0.25 : 0.10;
+
+        if (rnd() < sparkChance) {
+          typeA[i] = E.SPARK;
+          dataA[i] = 10 + irand(12);
+        } else if (rnd() < fireChance) {
+          typeA[i] = E.FIRE;
+          dataA[i] = 50 + irand(70);
+        }
+        markCellAndNeighbors(b.x, b.y);
+      } else if (IS_BURNABLE[t]) {
+        typeA[i] = E.FIRE;
+        dataA[i] = 70 + irand(80);
+        markCellAndNeighbors(b.x, b.y);
+      }
+
+      // Druck entlang des Pfads
+      const ai = aidx(toAirX(b.x), toAirY(b.y));
+      pField[ai] = clamp(pField[ai] + (b.main ? 1100 : 500), -30000, 30000);
+
+      // Nebenäste sterben früher ab
+      if (!b.main && s > 8 && rnd() < 0.15) {
+        b.active = false;
+      }
+    }
   }
 }
 
@@ -2617,6 +2942,55 @@ function updatePixelsForChunk(cx,cy){
         const wet = clamp(m/255, 0, 1);
         col = blend(col, 0xff2a201a, wet*0.35);
       }
+      // ===== WET SAND VISUALISIERUNG =====
+      if (t===E.SAND) {
+        const wetness = dataA[i] | 0;
+        if (wetness > 0) {
+          // Nasser Sand: dunkler, gesättigter
+          const wetFactor = clamp(wetness / 200, 0, 1);
+          col = blend(col, 0xff5a6880, wetFactor * 0.45);  // Dunkler, grauer
+        }
+      }
+      // ===== KEIMENDER SAMEN VISUALISIERUNG =====
+      if (t===E.SEED) {
+        const rawData = dataA[i] | 0;
+        const age = rawData & 0x7F;
+        const germinating = (rawData >> 7) & 1;
+
+        if (germinating) {
+          // Keimend: wird grünlicher, zeigt "ich arbeite"
+          const progress = clamp(age / 40, 0, 1);
+          col = blend(col, 0xff4aaa60, progress * 0.5);
+          // Leichtes Pulsieren
+          if ((tick & 15) < 8) {
+            col = blend(col, 0xff60c070, 0.15);
+          }
+        } else if (age === 0 && rawData > 0) {
+          // Absterbender Samen: dunkler
+          col = blend(col, 0xff404040, 0.4);
+        }
+      }
+      // ===== LAVA VISUALISIERUNG (Kruste + Hitze) =====
+      if (t===E.LAVA) {
+        const rawData = dataA[i] | 0;
+        const heat = rawData & 0x7F;
+        const crusted = (rawData >> 7) & 1;
+
+        if (crusted) {
+          // Kruste: dunkler, grauer
+          col = blend(col, 0xff303030, 0.55);
+          // Gelegentliches Glühen durch Risse
+          if (heat > 70 && rnd() < 0.1) {
+            col = blend(col, 0xff4020ff, 0.4);
+          }
+        } else {
+          // Heiße Lava: heller bei mehr Hitze
+          const heatFactor = clamp(heat / 100, 0, 1);
+          col = blend(col, 0xff50eeff, heatFactor * 0.5);
+          // Flackern
+          if (rnd() < 0.2) col = blend(col, 0xff80d0ff, 0.3);
+        }
+      }
       if (t===E.WATER) {
         // baseline shimmer
         if ((tick & 31)===0 && rnd()<0.02) col = blend(col, 0xffbdf3ff, 0.35);
@@ -2673,9 +3047,23 @@ function updatePixelsForChunk(cx,cy){
         col = blend(col, 0xffffffff, rnd()*0.55);
       }
       if (t===E.CLOUD) {
-        const charge = dataA[i] | 0;
-        const dark = clamp(charge / 255, 0, 1);
-        col = blend(col, 0xff66707a, 0.55 * dark);
+        // dataA: bits 0-6 = waterContent, bit 7 = charged
+        const rawData = dataA[i] | 0;
+        const waterContent = rawData & 0x7F;
+        const charged = (rawData >> 7) & 1;
+
+        // Dunklere Wolken bei mehr Wasser
+        const dark = clamp(waterContent / 100, 0, 1);
+        col = blend(col, 0xff5a6478, 0.55 * dark);
+
+        // Geladene Wolken: gelegentliches Aufblitzen
+        if (charged) {
+          col = blend(col, 0xff4a5060, 0.25);
+          // Interne Blitze (leuchten)
+          if (rnd() < 0.03) {
+            col = blend(col, 0xffffffff, 0.5);
+          }
+        }
       }
       if (t===E.PLANT || t===E.SPROUT) {
         const age = dataA[i];
@@ -2758,17 +3146,27 @@ function speedColor(v){
 }
 
 function drawWindHeatmap(){
+  // ===== FARB-OVERLAY NUR WO WIND IST =====
+  // Nicht ganzer Screen rot - nur Zellen mit speed > threshold
   ctx.save();
-  ctx.globalAlpha = 0.45;
+  const threshold = 2500;  // Minimum wind speed to show
+
   for (let ay=0; ay<aH; ay++) {
     for (let ax=0; ax<aW; ax++) {
       const i = aidx(ax,ay);
       const vx = (vxField[i] + (ambVX|0) + (globalVX|0))|0;
       const vy = (vyField[i] + (ambVY|0) + (globalVY|0))|0;
       const mag = Math.abs(vx) + Math.abs(vy);
+
+      // Skip cells with no significant wind
+      if (mag < threshold) continue;
+
+      // Alpha wächst mit Stärke (schwach = kaum sichtbar)
+      const alpha = clamp((mag - threshold) / 18000, 0.12, 0.55);
+
       const col = speedColor(mag);
       const r = col & 255, g = (col>>>8)&255, b=(col>>>16)&255;
-      ctx.fillStyle = `rgb(${r},${g},${b})`;
+      ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
       ctx.fillRect(ax*AIR_SCALE, ay*AIR_SCALE, AIR_SCALE, AIR_SCALE);
     }
   }
@@ -2800,20 +3198,76 @@ function drawWindOverlay(color){
 }
 
 function drawVectors(){
+  // ===== PFEILE DIE LEBENDIG WIRKEN =====
+  // Nur wo Wind ist, "atmen" mit Jitter, dynamische Dichte
   ctx.save();
-  ctx.globalAlpha = 0.8;
-  ctx.strokeStyle = 'rgba(255,255,255,0.55)';
-  ctx.lineWidth = 1;
-  const step = AIR_SCALE * 4;
-  for (let y=step/2; y<H; y+=step) {
-    for (let x=step/2; x<W; x+=step) {
-      const vx = sampleAirVX(x,y);
-      const vy = sampleAirVY(x,y);
-      const dx = clamp(vx/2500, -6, 6);
-      const dy = clamp(vy/2500, -6, 6);
+
+  const threshold = 2000;  // Minimum wind to show arrow
+  const baseStep = AIR_SCALE * 3;  // Base grid spacing
+
+  for (let ay=0; ay<aH; ay+=1) {
+    for (let ax=0; ax<aW; ax+=1) {
+      const i = aidx(ax,ay);
+      const vx = (vxField[i] + (ambVX|0) + (globalVX|0))|0;
+      const vy = (vyField[i] + (ambVY|0) + (globalVY|0))|0;
+      const mag = Math.hypot(vx, vy);
+
+      // Skip cells with no significant wind
+      if (mag < threshold) continue;
+
+      // Dynamische Dichte: bei starker Strömung mehr Pfeile
+      // Bei schwacher Strömung: nur jeden 2. oder 3. Pfeil zeigen
+      const densitySkip = mag < 5000 ? 3 : (mag < 10000 ? 2 : 1);
+      if ((ax + ay) % densitySkip !== 0) continue;
+
+      const x = ax * AIR_SCALE + AIR_SCALE/2;
+      const y = ay * AIR_SCALE + AIR_SCALE/2;
+
+      // Pfeil-Länge basierend auf Windstärke
+      const len = clamp(mag / 2000, 2, 12);
+      const nx = vx / (mag || 1);
+      const ny = vy / (mag || 1);
+
+      // ===== "ATMEN" - leichte Animation =====
+      // Kleine Winkelvariation basierend auf tick + Position
+      const breathPhase = Math.sin((tick * 0.08) + ax * 0.5 + ay * 0.3);
+      const jitterAngle = breathPhase * 0.12;  // ~7 Grad max
+      const ca = Math.cos(jitterAngle), sa = Math.sin(jitterAngle);
+      const jnx = nx * ca - ny * sa;
+      const jny = nx * sa + ny * ca;
+
+      // Leichte Längenvariation (atmen)
+      const breathLen = len * (1 + breathPhase * 0.08);
+
+      const dx = jnx * breathLen;
+      const dy = jny * breathLen;
+
+      // Farbe basierend auf Stärke
+      const alpha = clamp(mag / 15000, 0.35, 0.85);
+      const col = speedColor(mag);
+      const r = col & 255, g = (col>>>8)&255, b=(col>>>16)&255;
+
+      // Pfeil-Linie
+      ctx.strokeStyle = `rgba(${r},${g},${b},${alpha})`;
+      ctx.lineWidth = mag > 8000 ? 1.5 : 1;
       ctx.beginPath();
-      ctx.moveTo(x,y);
-      ctx.lineTo(x+dx, y+dy);
+      ctx.moveTo(x, y);
+      ctx.lineTo(x + dx, y + dy);
+
+      // Pfeil-Spitze (kleines Dreieck)
+      if (len > 3) {
+        const headLen = 2.5;
+        const headAngle = 0.5;  // ~28 Grad
+        const hx1 = x + dx - headLen * (jnx * Math.cos(headAngle) - jny * Math.sin(headAngle));
+        const hy1 = y + dy - headLen * (jnx * Math.sin(headAngle) + jny * Math.cos(headAngle));
+        const hx2 = x + dx - headLen * (jnx * Math.cos(-headAngle) - jny * Math.sin(-headAngle));
+        const hy2 = y + dy - headLen * (jnx * Math.sin(-headAngle) + jny * Math.cos(-headAngle));
+        ctx.moveTo(x + dx, y + dy);
+        ctx.lineTo(hx1, hy1);
+        ctx.moveTo(x + dx, y + dy);
+        ctx.lineTo(hx2, hy2);
+      }
+
       ctx.stroke();
     }
   }
@@ -2821,20 +3275,86 @@ function drawVectors(){
 }
 
 let tracerPhase = 0;
+let tracerParticles = [];  // Persistent tracer particles
+const MAX_TRACERS = 600;   // Reduced for performance
+
 function drawTracers(){
+  // ===== TRACER-PARTIKEL NUR WO WIND IST =====
+  // Performance-optimiert: weniger Partikel, nur in Windgebieten
   ctx.save();
-  ctx.globalAlpha = 0.6;
-  ctx.fillStyle = 'rgba(255,255,255,0.7)';
-  tracerPhase = (tracerPhase + 1) % 6;
-  for (let n=0; n<1100; n++) {
-    const x = (n*37 + tracerPhase*13) % W;
-    const y = (n*91 + tracerPhase*7) % H;
-    const vx = sampleAirVX(x,y);
-    const vy = sampleAirVY(x,y);
-    const dx = clamp(vx/2600, -4, 4);
-    const dy = clamp(vy/2600, -4, 4);
-    ctx.fillRect(x + dx, y + dy, 1, 1);
+
+  const threshold = 2500;
+  tracerPhase = (tracerPhase + 1) % 8;
+
+  // Initialize tracers if needed
+  if (tracerParticles.length === 0) {
+    for (let n = 0; n < MAX_TRACERS; n++) {
+      tracerParticles.push({
+        x: rnd() * W,
+        y: rnd() * H,
+        age: irand(60)
+      });
+    }
   }
+
+  // Update and draw tracers
+  for (let i = 0; i < tracerParticles.length; i++) {
+    const p = tracerParticles[i];
+    const vx = sampleAirVX(p.x|0, p.y|0);
+    const vy = sampleAirVY(p.x|0, p.y|0);
+    const mag = Math.hypot(vx, vy);
+
+    // Move particle with wind
+    p.x += vx / 3500;
+    p.y += vy / 3500;
+    p.age++;
+
+    // Respawn if out of bounds, too old, or in dead air
+    const outOfBounds = p.x < 0 || p.x >= W || p.y < 0 || p.y >= H;
+    const tooOld = p.age > 120;
+    const noWind = mag < threshold && p.age > 30;
+
+    if (outOfBounds || tooOld || noWind) {
+      // Find a spot with wind for respawn
+      let attempts = 0;
+      do {
+        p.x = rnd() * W;
+        p.y = rnd() * H;
+        const newVX = sampleAirVX(p.x|0, p.y|0);
+        const newVY = sampleAirVY(p.x|0, p.y|0);
+        if (Math.hypot(newVX, newVY) > threshold) break;
+        attempts++;
+      } while (attempts < 5);
+      p.age = 0;
+      continue;
+    }
+
+    // Only draw if in wind
+    if (mag < threshold) continue;
+
+    // Tracer appearance
+    const alpha = clamp(mag / 12000, 0.25, 0.75) * (1 - p.age / 150);
+    const size = mag > 8000 ? 2 : 1;
+
+    // Color based on wind speed
+    if (mag > 10000) {
+      const col = speedColor(mag);
+      const r = col & 255, g = (col>>>8)&255, b=(col>>>16)&255;
+      ctx.fillStyle = `rgba(${r},${g},${b},${alpha})`;
+    } else {
+      ctx.fillStyle = `rgba(255,255,255,${alpha})`;
+    }
+
+    // Draw tracer with small tail
+    const dx = clamp(vx/4000, -3, 3);
+    const dy = clamp(vy/4000, -3, 3);
+    ctx.fillRect(p.x|0, p.y|0, size, size);
+    // Tail (fainter)
+    ctx.globalAlpha = alpha * 0.4;
+    ctx.fillRect((p.x - dx)|0, (p.y - dy)|0, 1, 1);
+    ctx.globalAlpha = 1;
+  }
+
   ctx.restore();
 }
 
