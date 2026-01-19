@@ -978,10 +978,52 @@ function powderStep(x,y,t){
   
   // ==== ASH & SEED: Light particles, very wind-sensitive ====
   if (t===E.ASH || t===E.SEED) {
+    const i = idx(x, y);
+    const data = dataA[i] | 0;
+    const isSnow = (t === E.ASH && data >= 200);
+
+    // ===== SCHNEE-SCHMELZEN =====
+    if (isSnow) {
+      let meltChance = 0;
+      let nearHeat = false;
+
+      // Check neighbors for heat sources
+      forNeighbors4(x, y, (nx, ny) => {
+        const nt = typeA[idx(nx, ny)];
+        if (nt === E.FIRE) { meltChance += 0.60; nearHeat = true; }
+        else if (nt === E.LAVA) { meltChance += 0.85; nearHeat = true; }
+        else if (nt === E.SPARK) { meltChance += 0.25; nearHeat = true; }
+        else if (nt === E.WATER) { meltChance += 0.08; }  // Wasser wärmt langsam
+      });
+
+      // High pressure (warm air) melts snow slowly
+      const ai = aidx(toAirX(x), toAirY(y));
+      const pressure = pField[ai] | 0;
+      if (pressure > 2000) meltChance += 0.03;
+      if (pressure > 4000) meltChance += 0.05;
+
+      // Snow low on the ground melts faster (accumulated warmth)
+      if (y > H * 0.85) meltChance += 0.02;
+
+      if (meltChance > 0 && rnd() < meltChance) {
+        // Schnee schmilzt zu Wasser
+        typeA[i] = E.WATER;
+        dataA[i] = nearHeat ? (80 + irand(40)) : (60 + irand(30));  // Kälteres Schmelzwasser
+        markCellAndNeighbors(x, y);
+        return;
+      }
+
+      // Snow accumulates and compacts over time
+      if ((tick & 15) === 0 && data > 200) {
+        dataA[i] = data - 1;  // Slowly compact (but stay snow)
+      }
+    }
+
     // These are light - wind affects them even at low levels
     if (wmag > WIND_THRESHOLD_LOW && exposedToWind) {
       // Can be lifted by upward wind
-      if (vy < -2000 && rnd() < 0.40) {
+      const liftThreshold = isSnow ? -1500 : -2000;  // Schnee wird leichter gehoben
+      if (vy < liftThreshold && rnd() < (isSnow ? 0.55 : 0.40)) {
         const tx = x + windDir;
         const ty = y - 1;
         if (inb(tx, ty) && isEmptyCell(typeA[idx(tx, ty)])) {
@@ -989,9 +1031,9 @@ function powderStep(x,y,t){
           return;
         }
       }
-      
-      // Horizontal drift
-      if (rnd() < 0.50) {
+
+      // Horizontal drift - snow drifts more easily
+      if (rnd() < (isSnow ? 0.65 : 0.50)) {
         const tx = x + windDir;
         if (inb(tx, y) && isEmptyCell(typeA[idx(tx, y)])) {
           swapAt(x, y, tx, y);
@@ -999,7 +1041,7 @@ function powderStep(x,y,t){
         }
       }
     }
-    
+
     // Slow falling
     if (belowY < H && trySwapIfHeavier(x,y,x,belowY)) return;
     const bias = wmag > 800 ? windDir : (rnd() < 0.5 ? -1 : 1);
@@ -1512,7 +1554,7 @@ function gasStep(x,y,t){
       }
     }
 
-    // ===== REGEN - entlädt waterContent =====
+    // ===== NIEDERSCHLAG - Regen oder Schnee =====
     // Regen nur wenn genug Wasser UND Masse
     const rainThreshold = 60 + (mass < 5 ? 30 : 0);
     if (waterContent > rainThreshold && mass >= 4) {
@@ -1523,12 +1565,30 @@ function gasStep(x,y,t){
           const bi = idx(x, by);
           const bt = typeA[bi];
           if (bt === E.AIR || bt === E.SMOKE || bt === E.STEAM) {
-            typeA[bi] = E.WATER;
-            dataA[bi] = 128;
-            markCellAndNeighbors(x, by);
-            // Regen entlädt waterContent
+            // ===== SCHNEE BEI KÄLTE =====
+            // Kälte-Indikatoren: hohe Wolke (y < H*0.3), kalte Luft (Druck < -2000)
+            // oder Eis in der Nähe
+            const isHigh = y < H * 0.35;
+            const isCold = pressure < -2500;
+            const nearIce = countNeighbors8(x, y, E.ICE) > 0;
+            const snowChance = (isHigh ? 0.4 : 0) + (isCold ? 0.35 : 0) + (nearIce ? 0.25 : 0);
+
+            if (rnd() < snowChance) {
+              // SCHNEE: fällt als leichtes Eis-Partikel
+              // Verwende ASH mit speziellem Flag (dataA > 200 = Schnee)
+              typeA[bi] = E.ASH;
+              dataA[bi] = 220 + irand(35);  // 220-255 = Schneeflocke
+              markCellAndNeighbors(x, by);
+            } else {
+              // Normaler REGEN
+              typeA[bi] = E.WATER;
+              dataA[bi] = 100 + irand(50);  // Etwas kühler als 128
+              markCellAndNeighbors(x, by);
+            }
+
+            // Niederschlag entlädt waterContent
             waterContent = Math.max(0, waterContent - 15 - irand(10));
-            // Nach Regen: updraft wird gedämpft
+            // Nach Niederschlag: updraft wird gedämpft
             vyField[ai] = (vyField[ai] * 0.85) | 0;
           }
         }
@@ -3144,27 +3204,73 @@ function updatePixelsForChunk(cx,cy){
           col = blend(col, 0xffcfeaff, 0.35 * cold);
         }
 
-        // wind-driven surface "waves" (purely visual, cheap, makes it feel alive)
+        // ===== TIEFE-BASIERTE FÄRBUNG =====
+        // Zähle Wasser-Pixel darüber für Tiefe-Effekt
+        let depth = 0;
+        for (let dy = 1; dy <= 4; dy++) {
+          const checkY = y - dy;
+          if (checkY >= 0 && typeA[idx(x, checkY)] === E.WATER) depth++;
+        }
+        if (depth > 0) {
+          // Tieferes Wasser ist dunkler/satter
+          const depthFactor = depth / 4;
+          col = blend(col, 0xff804010, 0.15 * depthFactor);  // Dunkler Blauton
+        }
+
+        // ===== OBERFLÄCHEN-WELLEN =====
         if (y > 0) {
           const aboveT = typeA[idx(x, y-1)];
-          if (aboveT === E.AIR || aboveT === E.SMOKE || aboveT === E.STEAM) {
+          const isAtSurface = (aboveT === E.AIR || aboveT === E.SMOKE || aboveT === E.STEAM);
+
+          if (isAtSurface) {
+            // Surface highlight - immer sichtbar
+            const surfaceShine = Math.sin((x * 0.15 + tick * 0.08)) * 0.5 + 0.5;
+            col = blend(col, 0xffe8f8ff, 0.12 + 0.08 * surfaceShine);
+
+            // Wind-driven waves
             const vx = sampleAirVX(x,y);
             const vy = sampleAirVY(x,y);
             const mag = Math.abs(vx) + Math.abs(vy);
-            const chop = clamp(mag / 18000, 0, 1);
-            if (chop > 0.05) {
-              const pat = ((x * 13 + tick * 5) & 31) / 31;
-              if (pat < chop * 0.22) {
-                col = blend(col, 0xffe8fbff, 0.55 * chop);
+            const chop = clamp(mag / 12000, 0, 1);  // Empfindlicher
+
+            if (chop > 0.02) {
+              // Sinuswelle entlang der Oberfläche
+              const wavePhase = x * 0.25 + tick * 0.12 * (vx > 0 ? 1 : -1);
+              const wavePeak = Math.sin(wavePhase) * 0.5 + 0.5;
+
+              // Wellen-Highlights
+              if (wavePeak > 0.6) {
+                col = blend(col, 0xffffffff, 0.35 * chop * (wavePeak - 0.6) * 2.5);
               }
-              // occasional whitecap pixel just above the water (only if within this chunk)
-              if (aboveT === E.AIR && (y-1) >= y0) {
-                const pat2 = ((x * 29 + tick * 7) & 63) / 63;
-                if (pat2 < chop * 0.10) {
-                  const ai = idx(x, y-1);
-                  const foam =  (150<<24) | (255<<16) | (255<<8) | 255;
-                  pix32[ai] = blend(pix32[ai], foam, 0.70 * chop);
+
+              // Zusätzliche kleine Kräuselungen
+              const ripple = Math.sin(x * 0.8 + tick * 0.25) * Math.sin(y * 0.3 + tick * 0.15);
+              if (ripple > 0.3 && chop > 0.15) {
+                col = blend(col, 0xffd0f0ff, 0.18 * chop);
+              }
+
+              // Schaum/Gischt bei stärkerem Wind
+              if (chop > 0.35) {
+                const foamPattern = ((x * 17 + tick * 3) ^ (y * 7)) & 31;
+                if (foamPattern < chop * 8) {
+                  col = blend(col, 0xffffffff, 0.50 * chop);
                 }
+
+                // Spray-Partikel über der Wasserfläche
+                if (aboveT === E.AIR && (y-1) >= y0 && chop > 0.5) {
+                  const sprayChance = ((x * 29 + tick * 11) & 63) / 63;
+                  if (sprayChance < chop * 0.15) {
+                    const ai = idx(x, y-1);
+                    const spray = (180<<24) | (255<<16) | (255<<8) | 255;
+                    pix32[ai] = blend(pix32[ai], spray, 0.65 * chop);
+                  }
+                }
+              }
+            } else {
+              // Ruhiges Wasser - sanfte Reflexionen
+              const calmWave = Math.sin(x * 0.1 + tick * 0.03) * 0.5 + 0.5;
+              if (calmWave > 0.7) {
+                col = blend(col, 0xffe8f8ff, 0.08);
               }
             }
           }
@@ -3179,6 +3285,18 @@ function updatePixelsForChunk(cx,cy){
       }
       if (t===E.STEAM) {
         if (rnd()<0.04) col = blend(col, 0xffffffff, 0.20);
+      }
+      // ===== SCHNEE (ASH mit dataA > 200) =====
+      if (t===E.ASH) {
+        const data = dataA[i] | 0;
+        if (data >= 200) {
+          // Schneeflocke: weiß mit leichtem Schimmer
+          col = 0xffffffff;  // Weiß
+          // Leichtes Funkeln
+          if (rnd() < 0.08) {
+            col = blend(col, 0xffd0e8ff, 0.3);  // Leicht blau
+          }
+        }
       }
       if (t===E.SPARK) {
         // Firework sparks can have different colors based on upper data bits
